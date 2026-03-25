@@ -1,3 +1,13 @@
-from .splits import make_participant_split
+from .splits import (
+    SplitIndexSummary,
+    make_participant_split,
+    select_subset_sample_ids,
+    summarize_participant_slices,
+)
 
-__all__ = ["make_participant_split"]
+__all__ = [
+    "SplitIndexSummary",
+    "make_participant_split",
+    "select_subset_sample_ids",
+    "summarize_participant_slices",
+]

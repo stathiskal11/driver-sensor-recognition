@@ -216,6 +216,7 @@ class HDBDPaperWindowDataset(Dataset):
         heatmap_variant: str = "sigma64",
         signal_columns: list[str] | None = None,
         participant_ids: Iterable[str] | None = None,
+        sample_ids: Iterable[int] | None = None,
         limit_samples: int | None = None,
         cache_dir: str | Path | None = None,
     ) -> None:
@@ -290,6 +291,18 @@ class HDBDPaperWindowDataset(Dataset):
             index_frame = index_frame[
                 index_frame["participant_id"].isin(participant_set)
             ]
+
+        if sample_ids is not None:
+            ordered_sample_ids = [int(sample_id) for sample_id in sample_ids]
+            sample_id_set = set(ordered_sample_ids)
+            index_frame = index_frame[index_frame["sample_id"].isin(sample_id_set)]
+            sample_order = {
+                sample_id: order for order, sample_id in enumerate(ordered_sample_ids)
+            }
+            index_frame["_sample_order"] = index_frame["sample_id"].map(sample_order)
+            index_frame = index_frame.sort_values("_sample_order").drop(
+                columns="_sample_order"
+            )
 
         if limit_samples is not None:
             index_frame = index_frame.head(limit_samples)
