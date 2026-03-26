@@ -19,7 +19,9 @@ from src.data import HDBDPaperWindowDataset
 from src.evaluation import BinaryPredictionMetrics, summarize_binary_predictions
 from src.models import PaperTakeoverBaselineModel
 from src.training import (
+    ExperimentRecorder,
     SplitIndexSummary,
+    default_experiment_root,
     make_participant_split,
     select_subset_sample_ids,
     summarize_participant_slices,
@@ -129,6 +131,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="How many shuffled participant-independent partition groups to run.",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional descriptive name for the experiment directory.",
+    )
+    parser.add_argument(
+        "--experiment-root",
+        type=Path,
+        default=default_experiment_root(REPO_ROOT),
+        help="Directory where experiment logs and checkpoints are saved.",
+    )
+    parser.add_argument(
+        "--checkpoint-metric",
+        choices=["val_roc_auc", "val_loss"],
+        default="val_roc_auc",
+        help="Validation metric used to choose the best checkpoint.",
     )
     return parser.parse_args()
 
@@ -292,11 +312,32 @@ def format_aggregate_metrics(
     )
 
 
+def namespace_to_serializable_dict(args: argparse.Namespace) -> dict[str, object]:
+    serialized: dict[str, object] = {}
+    for key, value in vars(args).items():
+        serialized[key] = str(value) if isinstance(value, Path) else value
+    return serialized
+
+
+def checkpoint_metric_payload(
+    metric_name: str,
+    val_metrics: BinaryPredictionMetrics,
+) -> tuple[float, str]:
+    if metric_name == "val_roc_auc":
+        if val_metrics.roc_auc is not None:
+            return val_metrics.roc_auc, "val_roc_auc"
+        return -val_metrics.loss, "neg_val_loss_fallback"
+    if metric_name == "val_loss":
+        return -val_metrics.loss, "neg_val_loss"
+    raise ValueError(f"Unsupported checkpoint metric: {metric_name}")
+
+
 def run_single_split(
     args: argparse.Namespace,
     *,
     split_seed: int,
     device: torch.device,
+    recorder: ExperimentRecorder | None,
 ) -> dict[str, object]:
     splits = make_participant_split(args.index, seed=split_seed)
     print(f"split_seed={split_seed}")
@@ -371,8 +412,10 @@ def run_single_split(
     if test_dataset is not None:
         active_datasets["test"] = test_dataset
 
+    loaded_summaries: dict[str, SplitIndexSummary] = {}
     for split_name, dataset in active_datasets.items():
         loaded_summary = summarize_loaded_dataset(dataset)
+        loaded_summaries[split_name] = loaded_summary
         print(
             format_split_summary(
                 split_name, loaded_summary, scope="loaded_subset"
@@ -380,6 +423,14 @@ def run_single_split(
         )
         maybe_warn_for_zero_positives(
             split_name, loaded_summary, scope="loaded_subset"
+        )
+
+    if recorder is not None:
+        recorder.record_split_setup(
+            split_seed=split_seed,
+            participant_splits=splits,
+            full_summaries=full_summaries,
+            loaded_summaries=loaded_summaries,
         )
 
     if args.report_only:
@@ -415,6 +466,8 @@ def run_single_split(
     print(f"device={device}")
     train_metrics: BinaryPredictionMetrics | None = None
     val_metrics: BinaryPredictionMetrics | None = None
+    best_checkpoint_score = float("-inf")
+    best_checkpoint_info: dict[str, object] = {}
     for epoch in range(args.epochs):
         train_metrics = run_epoch(
             model=model,
@@ -438,6 +491,50 @@ def run_single_split(
             f"{format_epoch_metrics('val', val_metrics)}"
         )
 
+        if recorder is not None:
+            recorder.record_epoch(
+                split_seed=split_seed,
+                epoch=epoch + 1,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+            )
+            checkpoint_score, checkpoint_metric_used = checkpoint_metric_payload(
+                args.checkpoint_metric,
+                val_metrics,
+            )
+            last_checkpoint_path = recorder.save_checkpoint(
+                split_seed=split_seed,
+                epoch=epoch + 1,
+                checkpoint_tag="last",
+                checkpoint_metric_name=checkpoint_metric_used,
+                checkpoint_metric_value=checkpoint_score,
+                model=model,
+                optimizer=optimizer,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+            )
+            print(f"last_checkpoint={last_checkpoint_path}")
+            if checkpoint_score > best_checkpoint_score:
+                best_checkpoint_score = checkpoint_score
+                best_checkpoint_path = recorder.save_checkpoint(
+                    split_seed=split_seed,
+                    epoch=epoch + 1,
+                    checkpoint_tag="best",
+                    checkpoint_metric_name=checkpoint_metric_used,
+                    checkpoint_metric_value=checkpoint_score,
+                    model=model,
+                    optimizer=optimizer,
+                    train_metrics=train_metrics,
+                    val_metrics=val_metrics,
+                )
+                best_checkpoint_info = {
+                    "path": str(best_checkpoint_path),
+                    "epoch": epoch + 1,
+                    "metric_name": checkpoint_metric_used,
+                    "metric_value": checkpoint_score,
+                }
+                print(f"best_checkpoint={best_checkpoint_path}")
+
     test_metrics = None
     if test_loader is not None:
         test_metrics = run_epoch(
@@ -450,17 +547,34 @@ def run_single_split(
         )
         print(f"test_metrics={asdict(test_metrics)}")
 
+    if recorder is not None:
+        recorder.record_split_result(
+            split_seed=split_seed,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            best_checkpoint=best_checkpoint_info,
+        )
+
     return {
         "split_seed": split_seed,
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
         "test_metrics": test_metrics,
+        "best_checkpoint": best_checkpoint_info,
     }
 
 
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    recorder = ExperimentRecorder(
+        experiment_root=args.experiment_root,
+        run_name=args.run_name,
+        args=namespace_to_serializable_dict(args),
+        report_only=args.report_only,
+    )
+    print(f"run_dir={recorder.run_dir}")
 
     split_results: list[dict[str, object]] = []
     for split_offset in range(args.num_split_groups):
@@ -474,25 +588,45 @@ def main() -> None:
                 args,
                 split_seed=current_split_seed,
                 device=device,
+                recorder=recorder,
             )
         )
 
-    if args.report_only or args.num_split_groups <= 1:
+    aggregate: dict[str, object] = {
+        "num_split_groups": args.num_split_groups,
+    }
+    if args.report_only:
+        summary_path = recorder.finalize(aggregate=aggregate)
+        print(f"summary_path={summary_path}")
         return
 
-    val_metric_list = [
+    val_metric_list: list[BinaryPredictionMetrics] = [
         result["val_metrics"]
         for result in split_results
         if result["val_metrics"] is not None
     ]
-    test_metric_list = [
+    test_metric_list: list[BinaryPredictionMetrics] = [
         result["test_metrics"]
         for result in split_results
         if result["test_metrics"] is not None
     ]
-    print(format_aggregate_metrics("val", val_metric_list))
+    aggregate["val"] = {
+        "text": format_aggregate_metrics("val", val_metric_list),
+        "metrics": [asdict(metrics) for metrics in val_metric_list],
+    }
+    print(aggregate["val"]["text"])
     if test_metric_list:
-        print(format_aggregate_metrics("test", test_metric_list))
+        aggregate["test"] = {
+            "text": format_aggregate_metrics("test", test_metric_list),
+            "metrics": [asdict(metrics) for metrics in test_metric_list],
+        }
+        print(aggregate["test"]["text"])
+
+    if args.num_split_groups <= 1:
+        aggregate["single_split"] = True
+
+    summary_path = recorder.finalize(aggregate=aggregate)
+    print(f"summary_path={summary_path}")
 
 
 if __name__ == "__main__":
