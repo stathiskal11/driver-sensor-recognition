@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import asdict
+from statistics import mean
 from pathlib import Path
 
 import torch
@@ -122,6 +123,12 @@ def parse_args() -> argparse.Namespace:
         choices=["head", "random", "balanced"],
         default="balanced",
         help="How to choose limited debug subsets when limit_*_samples is set.",
+    )
+    parser.add_argument(
+        "--num-split-groups",
+        type=int,
+        default=1,
+        help="How many shuffled participant-independent partition groups to run.",
     )
     return parser.parse_args()
 
@@ -265,12 +272,34 @@ def maybe_warn_for_zero_positives(
         )
 
 
-def main() -> None:
-    args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def format_aggregate_metrics(
+    prefix: str,
+    metrics_list: list[BinaryPredictionMetrics],
+) -> str:
+    if not metrics_list:
+        return f"{prefix}_aggregate=n/a"
 
-    splits = make_participant_split(args.index, seed=args.split_seed)
-    print(f"split_seed={args.split_seed}")
+    roc_auc_values = [metrics.roc_auc for metrics in metrics_list if metrics.roc_auc is not None]
+    roc_auc_text = "n/a" if not roc_auc_values else f"{mean(roc_auc_values):.6f}"
+    return (
+        f"{prefix}_aggregate: "
+        f"splits={len(metrics_list)} "
+        f"mean_loss={mean([metrics.loss for metrics in metrics_list]):.6f} "
+        f"mean_examples={mean([metrics.example_count for metrics in metrics_list]):.2f} "
+        f"mean_positive_rate={mean([metrics.positive_rate for metrics in metrics_list]):.6f} "
+        f"mean_probability={mean([metrics.mean_probability for metrics in metrics_list]):.6f} "
+        f"mean_roc_auc={roc_auc_text}"
+    )
+
+
+def run_single_split(
+    args: argparse.Namespace,
+    *,
+    split_seed: int,
+    device: torch.device,
+) -> dict[str, object]:
+    splits = make_participant_split(args.index, seed=split_seed)
+    print(f"split_seed={split_seed}")
     print(f"subset_strategy={args.subset_strategy}")
     print(f"train_participants={splits['train']}")
     print(f"val_participants={splits['val']}")
@@ -288,14 +317,14 @@ def main() -> None:
         args.index,
         splits["train"],
         args.limit_train_samples,
-        seed=args.split_seed,
+        seed=split_seed,
         strategy=args.subset_strategy,
     )
     val_sample_ids = select_subset_sample_ids(
         args.index,
         splits["val"],
         args.limit_val_samples,
-        seed=args.split_seed + 1,
+        seed=split_seed + 1,
         strategy=args.subset_strategy,
     )
     test_sample_ids = None
@@ -304,7 +333,7 @@ def main() -> None:
             args.index,
             splits["test"],
             args.limit_test_samples,
-            seed=args.split_seed + 2,
+            seed=split_seed + 2,
             strategy=args.subset_strategy,
         )
 
@@ -354,7 +383,12 @@ def main() -> None:
         )
 
     if args.report_only:
-        return
+        return {
+            "split_seed": split_seed,
+            "train_metrics": None,
+            "val_metrics": None,
+            "test_metrics": None,
+        }
 
     train_loader = make_loader(
         train_dataset,
@@ -379,6 +413,8 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
     print(f"device={device}")
+    train_metrics: BinaryPredictionMetrics | None = None
+    val_metrics: BinaryPredictionMetrics | None = None
     for epoch in range(args.epochs):
         train_metrics = run_epoch(
             model=model,
@@ -402,6 +438,7 @@ def main() -> None:
             f"{format_epoch_metrics('val', val_metrics)}"
         )
 
+    test_metrics = None
     if test_loader is not None:
         test_metrics = run_epoch(
             model=model,
@@ -412,6 +449,50 @@ def main() -> None:
             device=device,
         )
         print(f"test_metrics={asdict(test_metrics)}")
+
+    return {
+        "split_seed": split_seed,
+        "train_metrics": train_metrics,
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    split_results: list[dict[str, object]] = []
+    for split_offset in range(args.num_split_groups):
+        current_split_seed = args.split_seed + split_offset
+        if args.num_split_groups > 1:
+            print(
+                f"===== split_group={split_offset + 1}/{args.num_split_groups} ====="
+            )
+        split_results.append(
+            run_single_split(
+                args,
+                split_seed=current_split_seed,
+                device=device,
+            )
+        )
+
+    if args.report_only or args.num_split_groups <= 1:
+        return
+
+    val_metric_list = [
+        result["val_metrics"]
+        for result in split_results
+        if result["val_metrics"] is not None
+    ]
+    test_metric_list = [
+        result["test_metrics"]
+        for result in split_results
+        if result["test_metrics"] is not None
+    ]
+    print(format_aggregate_metrics("val", val_metric_list))
+    if test_metric_list:
+        print(format_aggregate_metrics("test", test_metric_list))
 
 
 if __name__ == "__main__":

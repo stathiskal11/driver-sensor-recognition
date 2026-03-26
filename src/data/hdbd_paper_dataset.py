@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import shutil
 import tarfile
 from collections import OrderedDict
@@ -24,14 +25,9 @@ HEATMAP_ARCHIVES = {
     "laplace": "./hdbd_data/Heat_maps_90_160_laplace.tar.gz",
 }
 
-DEFAULT_SIGNAL_COLUMNS = [
-    "ECGtoHR",
-    "GSR",
-    "Steering",
-    "Brake",
-    "RPM",
-    "Speed",
-]
+PHYSIOLOGY_SIGNAL_COLUMNS = ["ECGtoHR", "GSR"]
+CAN_BUS_SIGNAL_COLUMNS = ["Throttle", "RPM", "Steering", "Speed"]
+DEFAULT_SIGNAL_COLUMNS = PHYSIOLOGY_SIGNAL_COLUMNS + CAN_BUS_SIGNAL_COLUMNS
 NAVIGATION_CATEGORIES = ["left", "right", "straight", "unknown"]
 TRANSPARENCY_CATEGORIES = ["0", "1", "2"]
 WEATHER_CATEGORIES = ["0", "1"]
@@ -64,6 +60,10 @@ def default_cache_dir() -> Path:
     return repo_root() / "data" / "raw" / "hdbd_archives"
 
 
+def default_signal_stats_path() -> Path:
+    return repo_root() / "data" / "interim" / "paper_signal_stats.json"
+
+
 def ensure_inner_archive_cached(
     bundle_path: Path, inner_member_name: str, target_path: Path
 ) -> Path:
@@ -78,6 +78,133 @@ def ensure_inner_archive_cached(
         with target_path.open("wb") as out_file:
             shutil.copyfileobj(extracted, out_file, length=1024 * 1024)
     return target_path
+
+
+def _parse_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _valid_physiology_value(column: str, value: float | None) -> bool:
+    if value is None:
+        return False
+    if column == "ECGtoHR":
+        return value >= 0.0
+    if column == "GSR":
+        return value >= 0.0
+    return True
+
+
+def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
+    physiology_accumulators: dict[str, dict[str, dict[str, float]]] = {}
+    can_bus_min_max = {
+        column: {"min": float("inf"), "max": float("-inf")}
+        for column in CAN_BUS_SIGNAL_COLUMNS
+    }
+
+    with tarfile.open(csv_archive_path, "r:gz") as csv_tar:
+        for member in csv_tar:
+            if not member.isfile():
+                continue
+            if not member.name.endswith(".csv"):
+                continue
+            if "/.~lock." in member.name:
+                continue
+
+            participant_id = PurePosixPath(member.name).parts[1]
+            participant_acc = physiology_accumulators.setdefault(
+                participant_id,
+                {
+                    column: {"count": 0.0, "sum": 0.0, "sum_sq": 0.0}
+                    for column in PHYSIOLOGY_SIGNAL_COLUMNS
+                },
+            )
+
+            extracted = csv_tar.extractfile(member)
+            if extracted is None:
+                continue
+
+            rows = csv.DictReader(
+                extracted.read().decode("utf-8", errors="replace").splitlines()
+            )
+            for row in rows:
+                for column in PHYSIOLOGY_SIGNAL_COLUMNS:
+                    value = _parse_float(row.get(column))
+                    if not _valid_physiology_value(column, value):
+                        continue
+                    assert value is not None
+                    column_acc = participant_acc[column]
+                    column_acc["count"] += 1.0
+                    column_acc["sum"] += value
+                    column_acc["sum_sq"] += value * value
+
+                for column in CAN_BUS_SIGNAL_COLUMNS:
+                    value = _parse_float(row.get(column))
+                    if value is None:
+                        continue
+                    can_bus_min_max[column]["min"] = min(
+                        can_bus_min_max[column]["min"], value
+                    )
+                    can_bus_min_max[column]["max"] = max(
+                        can_bus_min_max[column]["max"], value
+                    )
+
+    physiology_stats: dict[str, dict[str, dict[str, float]]] = {}
+    for participant_id, participant_acc in physiology_accumulators.items():
+        physiology_stats[participant_id] = {}
+        for column, column_acc in participant_acc.items():
+            count = column_acc["count"]
+            if count <= 0:
+                physiology_stats[participant_id][column] = {
+                    "mean": 0.0,
+                    "std": 1.0,
+                }
+                continue
+            mean = column_acc["sum"] / count
+            variance = max(column_acc["sum_sq"] / count - mean * mean, 0.0)
+            std = variance**0.5
+            physiology_stats[participant_id][column] = {
+                "mean": mean,
+                "std": std if std > 0 else 1.0,
+            }
+
+    can_bus_stats: dict[str, dict[str, float]] = {}
+    for column, min_max in can_bus_min_max.items():
+        min_value = min_max["min"]
+        max_value = min_max["max"]
+        if min_value == float("inf") or max_value == float("-inf"):
+            min_value = 0.0
+            max_value = 1.0
+        if max_value <= min_value:
+            max_value = min_value + 1.0
+        can_bus_stats[column] = {
+            "min": min_value,
+            "max": max_value,
+        }
+
+    return {
+        "physiology": physiology_stats,
+        "can_bus": can_bus_stats,
+    }
+
+
+def ensure_signal_stats_cached(
+    csv_archive_path: Path,
+    stats_path: Path,
+) -> dict[str, object]:
+    if stats_path.exists():
+        with stats_path.open("r", encoding="utf-8") as stats_file:
+            return json.load(stats_file)
+
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    stats = compute_signal_stats(csv_archive_path)
+    with stats_path.open("w", encoding="utf-8") as stats_file:
+        json.dump(stats, stats_file, indent=2)
+    return stats
 
 
 class _ArrayCache:
@@ -231,6 +358,7 @@ class HDBDPaperWindowDataset(Dataset):
             Path(index_csv_path) if index_csv_path else default_index_path()
         )
         self.cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
+        self.signal_stats_path = default_signal_stats_path()
         self.signal_columns = signal_columns or list(DEFAULT_SIGNAL_COLUMNS)
         self.heatmap_variant = heatmap_variant
 
@@ -248,6 +376,10 @@ class HDBDPaperWindowDataset(Dataset):
             self.bundle_path,
             HEATMAP_ARCHIVES[self.heatmap_variant],
             self.cache_dir / f"Heat_maps_90_160_{self.heatmap_variant}.tar.gz",
+        )
+        self.signal_stats = ensure_signal_stats_cached(
+            self.csv_archive_path,
+            self.signal_stats_path,
         )
 
         usecols = [
@@ -333,6 +465,7 @@ class HDBDPaperWindowDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, object]:
         row = self.index.iloc[index]
         csv_member = str(row["csv_member"])
+        participant_id = str(row["participant_id"])
         start_idx = int(row["window_start_idx"])
         end_idx = int(row["window_end_idx"])
         lookback_steps = int(row["lookback_steps"])
@@ -357,7 +490,14 @@ class HDBDPaperWindowDataset(Dataset):
                 self.heatmap_store.load(f"{window_row['TimeStamp']}.png").unsqueeze(0)
             )
             signal_sequence.append(
-                [_safe_float(window_row.get(column, "")) for column in self.signal_columns]
+                [
+                    self._normalize_signal_value(
+                        participant_id=participant_id,
+                        column=column,
+                        raw_value=window_row.get(column, ""),
+                    )
+                    for column in self.signal_columns
+                ]
             )
 
         segmentation_tensor = torch.cat(segmentation_frames, dim=0)
@@ -381,9 +521,48 @@ class HDBDPaperWindowDataset(Dataset):
             "hmi": hmi_vector,
             "label": label,
             "sample_id": int(row["sample_id"]),
-            "participant_id": str(row["participant_id"]),
+            "participant_id": participant_id,
             "session_id": str(row["session_id"]),
             "csv_member": csv_member,
             "window_start_idx": start_idx,
             "window_end_idx": end_idx,
         }
+
+    def _normalize_signal_value(
+        self,
+        *,
+        participant_id: str,
+        column: str,
+        raw_value: str | None,
+    ) -> float:
+        parsed_value = _parse_float(raw_value)
+        if parsed_value is None:
+            return 0.0
+
+        if column in PHYSIOLOGY_SIGNAL_COLUMNS:
+            if not _valid_physiology_value(column, parsed_value):
+                return 0.0
+            participant_stats = self.signal_stats.get("physiology", {}).get(
+                participant_id, {}
+            )
+            column_stats = participant_stats.get(column)
+            if not column_stats:
+                return float(parsed_value)
+            std = float(column_stats.get("std", 1.0))
+            mean = float(column_stats.get("mean", 0.0))
+            if std <= 0.0:
+                return 0.0
+            return float((parsed_value - mean) / std)
+
+        if column in CAN_BUS_SIGNAL_COLUMNS:
+            column_stats = self.signal_stats.get("can_bus", {}).get(column)
+            if not column_stats:
+                return float(parsed_value)
+            min_value = float(column_stats.get("min", 0.0))
+            max_value = float(column_stats.get("max", 1.0))
+            if max_value <= min_value:
+                return 0.0
+            normalized = (parsed_value - min_value) / (max_value - min_value)
+            return float(max(0.0, min(1.0, normalized)))
+
+        return float(parsed_value)

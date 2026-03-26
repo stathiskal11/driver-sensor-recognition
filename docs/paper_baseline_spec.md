@@ -55,7 +55,15 @@ For the baseline reproduction, the simplest path is to use the precomputed 90x16
 ### CAN-Bus And Physiology
 
 - The paper flattens a 3-second sequence into `180` values, described as `6 signals x 3 seconds x 10 Hz`.
-- The extracted text available locally does not enumerate the exact six selected signals, so this must be confirmed during implementation from the dataset and paper details.
+- The paper text explicitly names the four CAN-Bus features as:
+  - `Throttle`
+  - `RPM`
+  - `Steering`
+  - `Speed`
+- Together with the two physiology signals:
+  - `ECGtoHR`
+  - `GSR`
+- This gives the 6-signal dense input used in the current baseline loader.
 
 ### Complementary HMI Metadata
 
@@ -142,6 +150,7 @@ Why this is the current default:
 
 - using only `final_timestep == main_keydown` yields about `0.47%` positives in the local archive
 - using a `1.0s` future-keydown horizon yields about `1.08%` positives, which is much closer to the paper's reported `1.0%`
+- a throttle-onset based alternative yields much larger positive-rate mismatches in the local archive, so the current evidence favors a keydown-based label rule over a pedal-threshold rule for the released HDBD files
 
 This is still an implementation assumption, not a fully confirmed fact from the paper text, so it should be treated as the current baseline hypothesis to test and refine.
 
