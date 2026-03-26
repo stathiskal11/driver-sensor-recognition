@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Small utility layer for experiment folders, summaries, and checkpoints."""
+
 import json
 import re
 from dataclasses import asdict, is_dataclass
@@ -66,6 +68,7 @@ class ExperimentRecorder:
             "aggregate": {},
         }
 
+        # config.json acts as the immutable snapshot of the run arguments.
         with self.config_path.open("w", encoding="utf-8") as config_file:
             json.dump(self._summary["args"], config_file, indent=2)
 

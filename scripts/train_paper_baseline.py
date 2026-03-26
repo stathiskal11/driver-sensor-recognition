@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""Training entrypoint για το baseline reproduction του paper.
+
+Το script αυτό ενώνει όλα τα προηγούμενα κομμάτια:
+- παίρνει το generated window index
+- φτιάχνει participant-independent splits
+- φορτώνει Dataset / DataLoader
+- εκπαιδεύει το baseline model
+- μετρά validation / test metrics
+- γράφει experiment logs και checkpoints
+"""
+
 import argparse
 import sys
 from dataclasses import asdict
@@ -13,6 +24,7 @@ from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
+    # Allows `python scripts/...` without packaging the repository first.
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.data import HDBDPaperWindowDataset
@@ -29,6 +41,7 @@ from src.training import (
 
 
 def parse_args() -> argparse.Namespace:
+    """Ορίζει όλα τα training, debug και logging arguments του run."""
     parser = argparse.ArgumentParser(
         description="Train or sanity-check the paper baseline model."
     )
@@ -161,6 +174,7 @@ def make_dataset(
     sample_ids: list[int] | None,
     limit_samples: int | None,
 ) -> HDBDPaperWindowDataset:
+    """Φτιάχνει ένα dataset object για το συγκεκριμένο split/subset."""
     return HDBDPaperWindowDataset(
         index_csv_path=index_path,
         bundle_path=bundle_path,
@@ -176,6 +190,7 @@ def make_loader(
     batch_size: int,
     shuffle: bool,
 ) -> DataLoader:
+    """Φτιάχνει DataLoader με τις ελάχιστες ρυθμίσεις που χρειαζόμαστε τώρα."""
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
 
 
@@ -187,6 +202,16 @@ def run_epoch(
     max_batches: int | None,
     device: torch.device,
 ) -> BinaryPredictionMetrics:
+    """Τρέχει ένα epoch είτε σε training είτε σε evaluation mode.
+
+    Αν δοθεί optimizer:
+    - το μοντέλο μπαίνει σε train mode
+    - γίνεται backward + optimizer step
+
+    Αν δεν δοθεί optimizer:
+    - το μοντέλο μπαίνει σε eval mode
+    - γίνεται μόνο forward και metric collection
+    """
     training = optimizer is not None
     if training:
         model.train()
@@ -202,12 +227,16 @@ def run_epoch(
         if max_batches is not None and batch_idx >= max_batches:
             break
 
+        # Το batch έχει ήδη το format που ορίζει ο HDBDPaperWindowDataset:
+        # scene_gaze, signals, hmi, label.
         scene_gaze = batch["scene_gaze"].to(device)
         signals = batch["signals"].to(device)
         hmi = batch["hmi"].to(device)
         labels = batch["label"].to(device)
 
         with torch.set_grad_enabled(training):
+            # Το model επιστρέφει logits. Οι probabilities βγαίνουν μόνο για
+            # logging/metrics με sigmoid πάνω στα logits.
             logits = model(scene_gaze=scene_gaze, signals=signals, hmi=hmi)
             loss = criterion(logits, labels)
             probabilities = torch.sigmoid(logits)
@@ -223,6 +252,8 @@ def run_epoch(
         labels_seen.extend(labels.detach().cpu().tolist())
         probabilities_seen.extend(probabilities.detach().cpu().tolist())
 
+    # Στο τέλος κάθε epoch κρατάμε όχι μόνο loss, αλλά και τα βασικά binary
+    # metrics που μας ενδιαφέρουν για το paper baseline.
     average_loss = total_loss / total_batches if total_batches else 0.0
     return summarize_binary_predictions(
         loss=average_loss,
@@ -233,6 +264,7 @@ def run_epoch(
 
 
 def format_epoch_metrics(prefix: str, metrics: BinaryPredictionMetrics) -> str:
+    """Μετατρέπει τα metrics ενός epoch σε μία compact γραμμή για terminal output."""
     roc_auc_text = "n/a" if metrics.roc_auc is None else f"{metrics.roc_auc:.6f}"
     return (
         f"{prefix}_loss={metrics.loss:.6f} "
@@ -245,6 +277,7 @@ def format_epoch_metrics(prefix: str, metrics: BinaryPredictionMetrics) -> str:
 
 
 def summarize_loaded_dataset(dataset: HDBDPaperWindowDataset) -> SplitIndexSummary:
+    """Μετράει το πραγματικό subset που φορτώθηκε σε ένα split."""
     index_frame = dataset.index
     sample_count = int(len(index_frame))
     positive_count = int(index_frame["label"].sum()) if sample_count else 0
@@ -264,6 +297,7 @@ def format_split_summary(
     *,
     scope: str,
 ) -> str:
+    """Επιστρέφει σταθερό text format για split statistics."""
     return (
         f"{scope}_{split_name}: "
         f"participants={summary.participant_count} "
@@ -279,6 +313,7 @@ def maybe_warn_for_zero_positives(
     *,
     scope: str,
 ) -> None:
+    """Προειδοποιεί όταν ένα subset είναι πολύ μικρό για χρήσιμα metrics."""
     if summary.sample_count == 0:
         print(
             f"warning={scope}_{split_name} has zero samples. "
@@ -296,6 +331,7 @@ def format_aggregate_metrics(
     prefix: str,
     metrics_list: list[BinaryPredictionMetrics],
 ) -> str:
+    """Συνοψίζει metrics από πολλά split groups σε μία γραμμή."""
     if not metrics_list:
         return f"{prefix}_aggregate=n/a"
 
@@ -313,6 +349,7 @@ def format_aggregate_metrics(
 
 
 def namespace_to_serializable_dict(args: argparse.Namespace) -> dict[str, object]:
+    """Μετατρέπει το argparse namespace σε JSON-friendly dict για logging."""
     serialized: dict[str, object] = {}
     for key, value in vars(args).items():
         serialized[key] = str(value) if isinstance(value, Path) else value
@@ -323,7 +360,14 @@ def checkpoint_metric_payload(
     metric_name: str,
     val_metrics: BinaryPredictionMetrics,
 ) -> tuple[float, str]:
+    """Επιστρέφει το score με το οποίο συγκρίνουμε checkpoints.
+
+    Επειδή σε μικρά debug runs το ROC AUC μπορεί να είναι undefined, το helper
+    αυτό δίνει και ασφαλές fallback σε validation loss.
+    """
     if metric_name == "val_roc_auc":
+        # Small debug subsets may not have both classes, so we fall back to
+        # validation loss instead of skipping checkpoint selection.
         if val_metrics.roc_auc is not None:
             return val_metrics.roc_auc, "val_roc_auc"
         return -val_metrics.loss, "neg_val_loss_fallback"
@@ -339,6 +383,15 @@ def run_single_split(
     device: torch.device,
     recorder: ExperimentRecorder | None,
 ) -> dict[str, object]:
+    """Τρέχει ολόκληρο το pipeline για ένα participant split seed.
+
+    Δηλαδή:
+    - δημιουργία train/val/test participant split
+    - επιλογή subset ids αν έχουμε debug limits
+    - dataset / dataloader creation
+    - training / validation / test
+    - logging και checkpoints
+    """
     splits = make_participant_split(args.index, seed=split_seed)
     print(f"split_seed={split_seed}")
     print(f"subset_strategy={args.subset_strategy}")
@@ -434,6 +487,8 @@ def run_single_split(
         )
 
     if args.report_only:
+        # Σε report-only mode σταματάμε εδώ, γιατί ο στόχος είναι μόνο να δούμε
+        # πώς είναι τα splits και όχι να τρέξουμε training.
         return {
             "split_seed": split_seed,
             "train_metrics": None,
@@ -469,6 +524,8 @@ def run_single_split(
     best_checkpoint_score = float("-inf")
     best_checkpoint_info: dict[str, object] = {}
     for epoch in range(args.epochs):
+        # Κάθε epoch έχει ένα train pass και ένα validation pass με τον ίδιο
+        # ακριβώς metric collection μηχανισμό.
         train_metrics = run_epoch(
             model=model,
             loader=train_loader,
@@ -515,6 +572,8 @@ def run_single_split(
             )
             print(f"last_checkpoint={last_checkpoint_path}")
             if checkpoint_score > best_checkpoint_score:
+                # Κρατάμε ξεχωριστό "best" checkpoint για το metric που έχει
+                # οριστεί από τα arguments του run.
                 best_checkpoint_score = checkpoint_score
                 best_checkpoint_path = recorder.save_checkpoint(
                     split_seed=split_seed,
@@ -537,6 +596,8 @@ def run_single_split(
 
     test_metrics = None
     if test_loader is not None:
+        # Το test τρέχει μόνο στο τέλος, ώστε να λειτουργεί ως πραγματικό
+        # held-out evaluation και όχι ως μέρος του training loop.
         test_metrics = run_epoch(
             model=model,
             loader=test_loader,
@@ -566,6 +627,13 @@ def run_single_split(
 
 
 def main() -> None:
+    """Κύριο entrypoint του training script.
+
+    Εδώ:
+    - δημιουργείται το experiment recorder
+    - τρέχουν 1 ή περισσότερα split groups
+    - γράφονται aggregate summaries στο τέλος
+    """
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     recorder = ExperimentRecorder(
@@ -583,6 +651,8 @@ def main() -> None:
             print(
                 f"===== split_group={split_offset + 1}/{args.num_split_groups} ====="
             )
+        # Repeating the run over shuffled participant groups makes evaluation
+        # closer to the multi-partition protocol described in the paper.
         split_results.append(
             run_single_split(
                 args,
@@ -596,6 +666,7 @@ def main() -> None:
         "num_split_groups": args.num_split_groups,
     }
     if args.report_only:
+        # Σε report-only mode σώζουμε μόνο summary των splits και τελειώνουμε.
         summary_path = recorder.finalize(aggregate=aggregate)
         print(f"summary_path={summary_path}")
         return

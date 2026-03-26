@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Baseline joint-embedding model used for the paper reproduction."""
+
 import torch
 from torch import nn
 
@@ -7,6 +9,7 @@ from torch import nn
 class VisualJointEmbedding3DCNN(nn.Module):
     def __init__(self, input_channels: int = 2) -> None:
         super().__init__()
+        # This branch compresses the scene/gaze clip into one visual embedding.
         self.features = nn.Sequential(
             nn.Conv3d(input_channels, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
@@ -37,6 +40,7 @@ class VisualJointEmbedding3DCNN(nn.Module):
 class SignalEmbeddingMLP(nn.Module):
     def __init__(self, timesteps: int = 30, signal_dim: int = 6) -> None:
         super().__init__()
+        # The signal stream is flattened and modeled as dense tabular input.
         self.network = nn.Sequential(
             nn.Linear(timesteps * signal_dim, 128),
             nn.ReLU(inplace=True),
@@ -65,6 +69,7 @@ class PaperTakeoverBaselineModel(nn.Module):
             timesteps=timesteps, signal_dim=signal_dim
         )
         fused_dim = 256 + 32 + hmi_dim
+        # Final prediction uses visual, signal, and HMI context together.
         self.classifier = nn.Sequential(
             nn.Linear(fused_dim, 512),
             nn.ReLU(inplace=True),

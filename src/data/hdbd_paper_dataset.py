@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Dataset utilities for loading HDBD paper-style multimodal windows."""
+
 import csv
 import io
 import json
@@ -71,6 +73,8 @@ def ensure_inner_archive_cached(
         return target_path
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    # The outer HDBD bundle contains several nested tar files. We cache the
+    # specific inner archive once so later runs can reuse it directly.
     with tarfile.open(bundle_path, "r:gz") as outer_tar:
         extracted = outer_tar.extractfile(inner_member_name)
         if extracted is None:
@@ -264,6 +268,8 @@ class _TarImageStore:
 
         member_name = self._member_name_by_basename.get(basename)
         if member_name is None:
+            # Returning zeros keeps tensor shapes stable even when a tiny number
+            # of precomputed image files are missing from the archive.
             tensor = torch.zeros(self.expected_size, dtype=torch.float32)
             self.cache.put(basename, tensor)
             return tensor.clone()
@@ -362,6 +368,7 @@ class HDBDPaperWindowDataset(Dataset):
         self.signal_columns = signal_columns or list(DEFAULT_SIGNAL_COLUMNS)
         self.heatmap_variant = heatmap_variant
 
+        # These are the three archives touched repeatedly during training.
         self.csv_archive_path = ensure_inner_archive_cached(
             self.bundle_path,
             CSV_ARCHIVE,
@@ -500,12 +507,14 @@ class HDBDPaperWindowDataset(Dataset):
                 ]
             )
 
+        # Channel 0 = segmentation clip, channel 1 = gaze heatmap clip.
         segmentation_tensor = torch.cat(segmentation_frames, dim=0)
         heatmap_tensor = torch.cat(heatmap_frames, dim=0)
         scene_gaze = torch.stack([segmentation_tensor, heatmap_tensor], dim=0)
 
         signals = torch.tensor(signal_sequence, dtype=torch.float32)
         final_row = window_rows[-1]
+        # HMI context is fused late in the model as a compact one-hot vector.
         hmi_vector = torch.tensor(
             _one_hot(final_row["navigation"], NAVIGATION_CATEGORIES)
             + _one_hot(final_row["transparency"], TRANSPARENCY_CATEGORIES)
@@ -552,6 +561,8 @@ class HDBDPaperWindowDataset(Dataset):
             mean = float(column_stats.get("mean", 0.0))
             if std <= 0.0:
                 return 0.0
+            # Physiology is normalized per participant so the model focuses on
+            # deviations from that driver's typical range.
             return float((parsed_value - mean) / std)
 
         if column in CAN_BUS_SIGNAL_COLUMNS:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Participant-level split helpers for paper-style evaluation."""
+
 import csv
 import random
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ def make_participant_split(
     rng = random.Random(seed)
     rng.shuffle(participants)
 
+    # Splitting at participant level prevents leakage across train/val/test.
     train_ids = participants[:train_count]
     val_ids = participants[train_count : train_count + val_count]
     test_ids = participants[train_count + val_count : expected_total]
@@ -115,6 +118,7 @@ def select_subset_sample_ids(
         subset = split_frame.sample(n=limit_samples, random_state=seed, replace=False)
         return subset["sample_id"].astype(int).tolist()
     else:
+        # Balanced subsets make quick CPU sanity runs more informative.
         positive_frame = split_frame[split_frame["label"] == 1]
         negative_frame = split_frame[split_frame["label"] == 0]
 

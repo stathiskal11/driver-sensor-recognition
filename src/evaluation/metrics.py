@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Helpers for summarizing binary classifier outputs during training."""
+
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -38,6 +40,8 @@ def summarize_binary_predictions(
     )
 
     roc_auc: float | None = None
+    # Tiny debug subsets may contain only one class, in which case ROC AUC is
+    # undefined and we leave it as None instead of forcing a bogus value.
     if example_count and np.unique(label_array).size >= 2:
         roc_auc = float(roc_auc_score(label_array, probability_array))
 

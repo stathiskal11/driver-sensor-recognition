@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+"""Γρήγορος έλεγχος του HDBD archive χωρίς extraction στο disk.
+
+Το script αυτό είναι το πρώτο βήμα του project:
+- ανοίγει το εξωτερικό `hdbd.tar.gz`
+- κοιτάζει τι nested archives υπάρχουν μέσα
+- μετρά participants / CSVs / rows
+- ελέγχει αν τα references προς segmentation images και heatmaps βρίσκονται όντως
+  μέσα στα αντίστοιχα archives
+
+Στόχος του δεν είναι να εκπαιδεύσει κάτι, αλλά να μας πει αν το dataset που
+έχουμε στα χέρια μας είναι αυτό που νομίζουμε ότι είναι.
+"""
+
 import argparse
 import csv
 import io
@@ -23,6 +36,8 @@ HEATMAP_ARCHIVES = {
 
 @dataclass
 class CsvSummary:
+    """Συγκεντρωτικά στοιχεία από τα participant-level CSV αρχεία."""
+
     participants: set[str] = field(default_factory=set)
     csv_files: int = 0
     total_rows: int = 0
@@ -38,6 +53,8 @@ class CsvSummary:
 
 @dataclass
 class ArchiveCoverage:
+    """Σύνοψη του πόσα sampled targets βρέθηκαν μέσα σε ένα file archive."""
+
     file_count: int = 0
     matched_rows: int = 0
     matched_unique_targets: set[str] = field(default_factory=set)
@@ -45,6 +62,7 @@ class ArchiveCoverage:
 
 
 def parse_args() -> argparse.Namespace:
+    """Διαβάζει τα command-line arguments του inspection script."""
     parser = argparse.ArgumentParser(
         description="Inspect the HDBD archive without extracting it to disk."
     )
@@ -70,6 +88,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def find_default_bundle(script_path: Path) -> Path:
+    """Ψάχνει το hdbd.tar.gz στα πιο συνηθισμένα local paths του project."""
     repo_root = script_path.resolve().parents[1]
     candidates = [
         repo_root / "data" / "raw" / "hdbd.tar.gz",
@@ -84,6 +103,7 @@ def find_default_bundle(script_path: Path) -> Path:
 
 
 def open_nested_tar(outer_tar: tarfile.TarFile, member_name: str) -> tarfile.TarFile:
+    """Ανοίγει ένα inner tar.gz που βρίσκεται μέσα στο εξωτερικό bundle."""
     extracted = outer_tar.extractfile(member_name)
     if extracted is None:
         raise FileNotFoundError(f"Could not open nested archive member: {member_name}")
@@ -91,6 +111,7 @@ def open_nested_tar(outer_tar: tarfile.TarFile, member_name: str) -> tarfile.Tar
 
 
 def read_outer_readme(outer_tar: tarfile.TarFile) -> str:
+    """Διαβάζει το dataset README από το outer archive αν υπάρχει."""
     extracted = outer_tar.extractfile(OUTER_README)
     if extracted is None:
         return ""
@@ -102,6 +123,14 @@ def scan_csv_archive(
     member_name: str,
     coverage_sample_rows: int,
 ) -> CsvSummary:
+    """Σαρώνει τα participant-level CSVs και συγκεντρώνει βασικά στατιστικά.
+
+    Εδώ χτίζουμε την πρώτη πραγματική εικόνα του dataset:
+    - πόσοι participants υπάρχουν
+    - πόσα CSV sessions υπάρχουν
+    - ποια πεδία έχουν τα rows
+    - πόσο sparse είναι τα key events
+    """
     summary = CsvSummary()
     sampled_rows = 0
 
@@ -124,6 +153,8 @@ def scan_csv_archive(
             if extracted is None:
                 continue
 
+            # Διαβάζουμε όλο το CSV member στη μνήμη γιατί κάθε participant/session
+            # file είναι σχετικά μικρό και αυτό απλοποιεί το inspection logic.
             decoded_lines = extracted.read().decode("utf-8", errors="replace").splitlines()
             reader = csv.DictReader(decoded_lines)
             if not summary.fieldnames:
@@ -137,6 +168,8 @@ def scan_csv_archive(
                 summary.weather_counts[row.get("weather", "<missing>")] += 1
 
                 if sampled_rows < coverage_sample_rows:
+                    # Sampled coverage keeps this script fast while still giving
+                    # us a strong sanity check for image and heatmap targets.
                     image_file = row.get("ImageFile")
                     timestamp = row.get("TimeStamp")
                     if image_file:
@@ -151,6 +184,7 @@ def scan_csv_archive(
 def scan_file_archive(
     outer_tar: tarfile.TarFile, member_name: str, sampled_targets: Counter[str]
 ) -> ArchiveCoverage:
+    """Ελέγχει αν sampled image/heatmap targets όντως υπάρχουν στο archive."""
     coverage = ArchiveCoverage()
     target_names = set(sampled_targets)
 
@@ -172,11 +206,13 @@ def scan_file_archive(
 
 
 def format_counter(counter: Counter[str]) -> str:
+    """Τυπώνει ένα Counter σε σταθερή και εύκολα αναγνώσιμη μορφή."""
     parts = [f"{key}={value}" for key, value in sorted(counter.items())]
     return ", ".join(parts)
 
 
 def format_missing(sampled_targets: Counter[str], matched_targets: set[str]) -> str:
+    """Δείχνει ένα μικρό preview από targets που δεν βρέθηκαν."""
     missing = sorted(set(sampled_targets) - matched_targets)
     if not missing:
         return "none"
@@ -187,6 +223,7 @@ def format_missing(sampled_targets: Counter[str], matched_targets: set[str]) -> 
 
 
 def positive_rate(keyevent_counts: Counter[str], total_rows: int) -> str:
+    """Υπολογίζει πόσο συχνό είναι το `main_keydown` στο raw row level."""
     if total_rows == 0:
         return "0.00%"
     positives = keyevent_counts.get("main_keydown", 0)
@@ -194,17 +231,29 @@ def positive_rate(keyevent_counts: Counter[str], total_rows: int) -> str:
 
 
 def print_section(title: str) -> None:
+    """Μικρό helper για πιο καθαρό terminal output."""
     print()
     print(title)
     print("-" * len(title))
 
 
 def main() -> None:
+    """Κύρια ροή του inspection.
+
+    Η σειρά είναι:
+    1. εντοπισμός του bundle
+    2. άνοιγμα outer archive
+    3. inspection των CSVs
+    4. coverage check για segmentation και heatmaps
+    5. εκτύπωση των συμπερασμάτων
+    """
     args = parse_args()
     bundle_path = args.bundle or find_default_bundle(Path(__file__))
     heatmap_member = HEATMAP_ARCHIVES[args.heatmap_variant]
 
     with tarfile.open(bundle_path, "r:gz") as outer_tar:
+        # Παίρνουμε πρώτα μια γενική εικόνα του outer archive και μετά μπαίνουμε
+        # στα nested αρχεία που μας ενδιαφέρουν για το baseline.
         outer_members = outer_tar.getmembers()
         member_names = [member.name for member in outer_members]
         readme_text = read_outer_readme(outer_tar)
