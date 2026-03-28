@@ -27,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     # Allows `python scripts/...` without packaging the repository first.
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.data import HDBDPaperWindowDataset
+from src.data import HDBDPaperWindowDataset, prefetch_subset_assets
 from src.evaluation import BinaryPredictionMetrics, summarize_binary_predictions
 from src.models import PaperTakeoverBaselineModel
 from src.training import (
@@ -164,6 +164,17 @@ def parse_args() -> argparse.Namespace:
         help="Optional local cache directory for extracted inner HDBD archives.",
     )
     parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker count. Values > 0 help most when assets are prefetched to local files.",
+    )
+    parser.add_argument(
+        "--prefetch-subset-assets",
+        action="store_true",
+        help="Extract the exact limited subset assets needed by the run into cache_dir/prefetched_assets before training.",
+    )
+    parser.add_argument(
         "--checkpoint-metric",
         choices=["val_roc_auc", "val_loss"],
         default="val_roc_auc",
@@ -197,9 +208,55 @@ def make_loader(
     dataset: HDBDPaperWindowDataset,
     batch_size: int,
     shuffle: bool,
+    num_workers: int,
+    pin_memory: bool,
 ) -> DataLoader:
     """Φτιάχνει DataLoader με τις ελάχιστες ρυθμίσεις που χρειαζόμαστε τώρα."""
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+
+
+def maybe_prefetch_active_assets(
+    *,
+    index_path: Path,
+    bundle_path: Path | None,
+    heatmap_variant: str,
+    cache_dir: Path | None,
+    sample_id_lists: list[list[int] | None],
+) -> None:
+    combined_sample_ids: list[int] = []
+    seen_sample_ids: set[int] = set()
+    for sample_ids in sample_id_lists:
+        if sample_ids is None:
+            continue
+        for sample_id in sample_ids:
+            normalized_id = int(sample_id)
+            if normalized_id in seen_sample_ids:
+                continue
+            seen_sample_ids.add(normalized_id)
+            combined_sample_ids.append(normalized_id)
+
+    if not combined_sample_ids:
+        print(
+            "prefetch_subset_assets=skipped "
+            "(no limited subset sample ids were available)"
+        )
+        return
+
+    prefetch_summary = prefetch_subset_assets(
+        index_csv_path=index_path,
+        bundle_path=bundle_path,
+        heatmap_variant=heatmap_variant,
+        sample_ids=combined_sample_ids,
+        cache_dir=cache_dir,
+    )
+    print(f"prefetch_subset_assets={prefetch_summary}")
 
 
 def run_epoch(
@@ -439,6 +496,15 @@ def run_single_split(
             strategy=args.subset_strategy,
         )
 
+    if args.prefetch_subset_assets:
+        maybe_prefetch_active_assets(
+            index_path=args.index,
+            bundle_path=args.bundle,
+            heatmap_variant=args.heatmap_variant,
+            cache_dir=args.cache_dir,
+            sample_id_lists=[train_sample_ids, val_sample_ids, test_sample_ids],
+        )
+
     train_dataset = make_dataset(
         index_path=args.index,
         bundle_path=args.bundle,
@@ -507,15 +573,23 @@ def run_single_split(
             "test_metrics": None,
         }
 
+    pin_memory = device.type == "cuda"
+    print(f"loader_num_workers={args.num_workers}")
+    print(f"loader_pin_memory={pin_memory}")
+
     train_loader = make_loader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
     )
     val_loader = make_loader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
     )
     test_loader = None
     if test_dataset is not None:
@@ -523,6 +597,8 @@ def run_single_split(
             test_dataset,
             batch_size=args.batch_size,
             shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
         )
 
     model = PaperTakeoverBaselineModel().to(device)

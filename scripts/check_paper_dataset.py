@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.data import HDBDPaperWindowDataset
+from src.data import HDBDPaperWindowDataset, prefetch_subset_assets
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +65,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional local cache directory for extracted inner HDBD archives.",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker count for the batch collation sanity check.",
+    )
+    parser.add_argument(
+        "--prefetch-assets",
+        action="store_true",
+        help="Prefetch the limited sample assets into cache_dir/prefetched_assets before loading.",
+    )
     return parser.parse_args()
 
 
@@ -76,6 +87,16 @@ def print_tensor_info(name: str, tensor: torch.Tensor) -> None:
 def main() -> None:
     """Τρέχει έναν μικρό end-to-end έλεγχο του loading pipeline."""
     args = parse_args()
+    if args.prefetch_assets:
+        prefetch_summary = prefetch_subset_assets(
+            index_csv_path=args.index,
+            bundle_path=args.bundle,
+            heatmap_variant=args.heatmap_variant,
+            limit_samples=args.limit_samples,
+            cache_dir=args.cache_dir,
+        )
+        print(f"prefetch_assets={prefetch_summary}")
+
     dataset = HDBDPaperWindowDataset(
         index_csv_path=args.index,
         bundle_path=args.bundle,
@@ -98,7 +119,14 @@ def main() -> None:
 
     # Collation is a separate failure point from single-sample loading, so we
     # always verify at least one real batch as well.
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=args.num_workers > 0,
+    )
     batch = next(iter(loader))
     print_tensor_info("batch.scene_gaze", batch["scene_gaze"])
     print_tensor_info("batch.signals", batch["signals"])
