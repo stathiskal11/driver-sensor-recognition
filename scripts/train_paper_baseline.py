@@ -158,6 +158,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory where experiment logs and checkpoints are saved.",
     )
     parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Optional local cache directory for extracted inner HDBD archives.",
+    )
+    parser.add_argument(
         "--checkpoint-metric",
         choices=["val_roc_auc", "val_loss"],
         default="val_roc_auc",
@@ -173,6 +179,7 @@ def make_dataset(
     participant_ids: list[str],
     sample_ids: list[int] | None,
     limit_samples: int | None,
+    cache_dir: Path | None,
 ) -> HDBDPaperWindowDataset:
     """Φτιάχνει ένα dataset object για το συγκεκριμένο split/subset."""
     return HDBDPaperWindowDataset(
@@ -182,6 +189,7 @@ def make_dataset(
         participant_ids=participant_ids,
         sample_ids=sample_ids,
         limit_samples=limit_samples,
+        cache_dir=cache_dir,
     )
 
 
@@ -438,6 +446,7 @@ def run_single_split(
         participant_ids=splits["train"],
         sample_ids=train_sample_ids,
         limit_samples=None,
+        cache_dir=args.cache_dir,
     )
     val_dataset = make_dataset(
         index_path=args.index,
@@ -446,6 +455,7 @@ def run_single_split(
         participant_ids=splits["val"],
         sample_ids=val_sample_ids,
         limit_samples=None,
+        cache_dir=args.cache_dir,
     )
     test_dataset = None
     if args.evaluate_test:
@@ -456,6 +466,7 @@ def run_single_split(
             participant_ids=splits["test"],
             sample_ids=test_sample_ids,
             limit_samples=None,
+            cache_dir=args.cache_dir,
         )
 
     active_datasets = {

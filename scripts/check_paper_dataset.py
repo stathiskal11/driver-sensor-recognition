@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Batch size for the DataLoader sanity check.",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Optional local cache directory for extracted inner HDBD archives.",
+    )
     return parser.parse_args()
 
 
@@ -75,6 +81,7 @@ def main() -> None:
         bundle_path=args.bundle,
         heatmap_variant=args.heatmap_variant,
         limit_samples=args.limit_samples,
+        cache_dir=args.cache_dir,
     )
 
     # Πρώτα ελέγχουμε ένα μεμονωμένο sample για να δούμε ακριβώς τι επιστρέφει
