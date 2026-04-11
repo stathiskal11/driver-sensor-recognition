@@ -88,6 +88,7 @@ class ExperimentRecorder:
                 "loaded_summaries": sanitize_for_json(loaded_summaries),
                 "final_metrics": {},
                 "best_checkpoint": {},
+                "test_evaluation_checkpoint": {},
             }
         )
 
@@ -149,6 +150,7 @@ class ExperimentRecorder:
         val_metrics: Any,
         test_metrics: Any,
         best_checkpoint: dict[str, Any],
+        test_evaluation_checkpoint: dict[str, Any],
     ) -> None:
         split_record = self._find_split_record(split_seed)
         split_record["final_metrics"] = {
@@ -157,6 +159,9 @@ class ExperimentRecorder:
             "test": sanitize_for_json(test_metrics),
         }
         split_record["best_checkpoint"] = sanitize_for_json(best_checkpoint)
+        split_record["test_evaluation_checkpoint"] = sanitize_for_json(
+            test_evaluation_checkpoint
+        )
 
     def finalize(self, *, aggregate: dict[str, Any]) -> Path:
         self._summary["aggregate"] = sanitize_for_json(aggregate)

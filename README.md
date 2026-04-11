@@ -23,7 +23,7 @@
 
 ## Δομή Φακέλων
 
-- `configs/`: αρχεία ρυθμίσεων πειραμάτων
+- `configs/`: JSON presets για reproducible experiments
 - `data/raw/`: raw αρχεία και cached archives
 - `data/interim/`: ενδιάμεσα artifacts όπως window index και signal stats
 - `data/processed/`: τελικά processed δεδομένα
@@ -73,6 +73,39 @@ cd C:\Users\User\Documents\ΔΙΠΛΩΜΑΤΙΚΗ\driver-sensor-recognition
 ```powershell
 .\.venv\Scripts\python.exe scripts\train_paper_baseline.py --bundle ..\hdbd.tar.gz --batch-size 1 --epochs 1 --max-train-batches 4 --max-val-batches 4 --limit-train-samples 8 --limit-val-samples 8 --evaluate-test --max-test-batches 4 --limit-test-samples 8 --subset-strategy balanced --run-name paper-pilot-exp1 --checkpoint-metric val_loss
 ```
+
+## Experiment Presets
+
+Υπάρχουν πλέον έτοιμα JSON configs στο `configs/` ώστε τα σημαντικά runs να είναι reproducible και να μην ξαναγράφονται κάθε φορά από την αρχή.
+
+Report-only 5-split preset:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train_paper_baseline.py --config configs\paper_report_5split.json
+```
+
+Medium readiness run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train_paper_baseline.py --config configs\paper_medium_readiness.json
+```
+
+Full paper-style reproduction run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train_paper_baseline.py --config configs\paper_full_reproduction.json
+```
+
+Μπορείς πάντα να κάνεις override ένα preset από το command line. Παράδειγμα:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train_paper_baseline.py --config configs\paper_medium_readiness.json --num-workers 2 --run-name medium-readiness-workers2
+```
+
+Σημείωση:
+
+- Τα `balanced` limited subsets είναι μόνο για debugging και όχι για paper-comparable metrics.
+- Το test evaluation πλέον μπορεί να γίνει πάνω στο `best` validation checkpoint με `--test-checkpoint best`.
 
 ## Τοπικό Setup
 
