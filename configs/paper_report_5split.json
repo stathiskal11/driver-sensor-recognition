@@ -21,6 +21,7 @@
   "cache_dir": null,
   "num_workers": 0,
   "prefetch_subset_assets": false,
+  "prefetch_active_splits": false,
   "checkpoint_metric": "val_roc_auc",
   "test_checkpoint": "best",
   "global_seed": 0,

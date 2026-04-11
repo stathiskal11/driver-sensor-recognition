@@ -8,6 +8,7 @@ import json
 import shutil
 import tarfile
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
@@ -311,6 +312,14 @@ class _ArrayCache:
             self._items.popitem(last=False)
 
 
+@dataclass
+class _SessionSequence:
+    image_files: list[str]
+    heatmap_files: list[str]
+    hmi_vectors: np.ndarray
+    normalized_signals: np.ndarray
+
+
 class _TarImageStore:
     def __init__(
         self,
@@ -323,26 +332,52 @@ class _TarImageStore:
         self.cache = _ArrayCache(max_items=cache_size)
         self._member_name_by_basename: dict[str, str] | None = None
         self._tar: tarfile.TarFile | None = None
+        self._member_info_by_name: dict[str, tarfile.TarInfo] | None = None
+
+    def _member_index_path(self) -> Path:
+        return self.archive_path.with_name(
+            self.archive_path.name + ".basename_index.json"
+        )
 
     def _ensure_member_map(self) -> None:
         if self._member_name_by_basename is not None:
             return
+
+        index_path = self._member_index_path()
+        if index_path.exists():
+            with index_path.open("r", encoding="utf-8") as index_file:
+                self._member_name_by_basename = json.load(index_file)
+            return
+
         mapping: dict[str, str] = {}
         with tarfile.open(self.archive_path, "r:gz") as tar:
             for member in tar:
                 if not member.isfile():
                     continue
                 mapping[PurePosixPath(member.name).name] = member.name
+
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_index_path = index_path.with_name(index_path.name + ".tmp")
+        with temp_index_path.open("w", encoding="utf-8") as index_file:
+            json.dump(mapping, index_file)
+        temp_index_path.replace(index_path)
         self._member_name_by_basename = mapping
 
     def _ensure_tar_open(self) -> None:
         if self._tar is None:
             self._tar = tarfile.open(self.archive_path, "r:gz")
+        if self._member_info_by_name is None:
+            assert self._tar is not None
+            self._member_info_by_name = {
+                member.name: member
+                for member in self._tar.getmembers()
+                if member.isfile()
+            }
 
     def load(self, basename: str) -> torch.Tensor:
         cached = self.cache.get(basename)
         if cached is not None:
-            return cached.clone()
+            return cached
 
         self._ensure_member_map()
         assert self._member_name_by_basename is not None
@@ -353,16 +388,23 @@ class _TarImageStore:
             # of precomputed image files are missing from the archive.
             tensor = torch.zeros(self.expected_size, dtype=torch.float32)
             self.cache.put(basename, tensor)
-            return tensor.clone()
+            return tensor
 
         self._ensure_tar_open()
         assert self._tar is not None
+        assert self._member_info_by_name is not None
 
-        extracted = self._tar.extractfile(member_name)
+        member_info = self._member_info_by_name.get(member_name)
+        if member_info is None:
+            tensor = torch.zeros(self.expected_size, dtype=torch.float32)
+            self.cache.put(basename, tensor)
+            return tensor
+
+        extracted = self._tar.extractfile(member_info)
         if extracted is None:
             tensor = torch.zeros(self.expected_size, dtype=torch.float32)
             self.cache.put(basename, tensor)
-            return tensor.clone()
+            return tensor
 
         image_bytes = extracted.read()
         with Image.open(io.BytesIO(image_bytes)) as image:
@@ -375,7 +417,7 @@ class _TarImageStore:
 
         tensor = torch.from_numpy(array)
         self.cache.put(basename, tensor)
-        return tensor.clone()
+        return tensor
 
 
 class _LocalImageStore:
@@ -392,7 +434,7 @@ class _LocalImageStore:
     def load(self, basename: str) -> torch.Tensor | None:
         cached = self.cache.get(basename)
         if cached is not None:
-            return cached.clone()
+            return cached
 
         image_path = self.root / basename
         if not image_path.exists():
@@ -408,7 +450,7 @@ class _LocalImageStore:
 
         tensor = torch.from_numpy(array)
         self.cache.put(basename, tensor)
-        return tensor.clone()
+        return tensor
 
 
 class _HybridImageStore:
@@ -439,6 +481,232 @@ class _HybridImageStore:
             if tensor is not None:
                 return tensor
         return self.tar_store.load(basename)
+
+
+def _participant_id_from_member_name(member_name: str) -> str:
+    normalized_name = normalize_member_name(member_name)
+    parts = PurePosixPath(normalized_name).parts
+    if len(parts) < 2:
+        raise ValueError(f"Could not infer participant id from csv member: {member_name}")
+    return str(parts[1])
+
+
+def _build_normalized_signal_column(
+    rows: list[dict[str, str]],
+    *,
+    participant_id: str,
+    column: str,
+    signal_stats: dict[str, object],
+) -> np.ndarray:
+    parsed_values = np.asarray(
+        [
+            np.nan if (value := _parse_float(row.get(column))) is None else value
+            for row in rows
+        ],
+        dtype=np.float32,
+    )
+    normalized = np.zeros(len(rows), dtype=np.float32)
+
+    finite_mask = np.isfinite(parsed_values)
+    if column in PHYSIOLOGY_SIGNAL_COLUMNS:
+        valid_mask = finite_mask & (parsed_values >= 0.0)
+        if not np.any(valid_mask):
+            return normalized
+
+        participant_stats = signal_stats.get("physiology", {}).get(participant_id, {})
+        column_stats = participant_stats.get(column)
+        if not column_stats:
+            normalized[valid_mask] = parsed_values[valid_mask]
+            return normalized
+
+        std = float(column_stats.get("std", 1.0))
+        mean = float(column_stats.get("mean", 0.0))
+        if std <= 0.0:
+            return normalized
+
+        normalized[valid_mask] = (parsed_values[valid_mask] - mean) / std
+        return normalized
+
+    valid_mask = finite_mask
+    if not np.any(valid_mask):
+        return normalized
+
+    if column in CAN_BUS_SIGNAL_COLUMNS:
+        column_stats = signal_stats.get("can_bus", {}).get(column)
+        if not column_stats:
+            normalized[valid_mask] = parsed_values[valid_mask]
+            return normalized
+
+        min_value = float(column_stats.get("min", 0.0))
+        max_value = float(column_stats.get("max", 1.0))
+        if max_value <= min_value:
+            return normalized
+
+        scaled = (parsed_values[valid_mask] - min_value) / (max_value - min_value)
+        normalized[valid_mask] = np.clip(scaled, 0.0, 1.0)
+        return normalized
+
+    normalized[valid_mask] = parsed_values[valid_mask]
+    return normalized
+
+
+def _build_session_sequence(
+    rows: list[dict[str, str]],
+    *,
+    member_name: str,
+    signal_columns: list[str],
+    signal_stats: dict[str, object],
+) -> _SessionSequence:
+    participant_id = _participant_id_from_member_name(member_name)
+    image_files = [str(row.get("ImageFile", "")) for row in rows]
+    heatmap_files = [
+        f"{timestamp}.png" if timestamp else ""
+        for timestamp in (row.get("TimeStamp", "") for row in rows)
+    ]
+    hmi_vectors = np.asarray(
+        [
+            _one_hot(str(row.get("navigation", "")), NAVIGATION_CATEGORIES)
+            + _one_hot(str(row.get("transparency", "")), TRANSPARENCY_CATEGORIES)
+            + _one_hot(str(row.get("weather", "")), WEATHER_CATEGORIES)
+            for row in rows
+        ],
+        dtype=np.float32,
+    )
+
+    signal_columns_data = [
+        _build_normalized_signal_column(
+            rows,
+            participant_id=participant_id,
+            column=column,
+            signal_stats=signal_stats,
+        )
+        for column in signal_columns
+    ]
+    normalized_signals = (
+        np.stack(signal_columns_data, axis=1)
+        if signal_columns_data
+        else np.zeros((len(rows), 0), dtype=np.float32)
+    )
+
+    return _SessionSequence(
+        image_files=image_files,
+        heatmap_files=heatmap_files,
+        hmi_vectors=hmi_vectors,
+        normalized_signals=normalized_signals,
+    )
+
+
+class _TarSessionStore:
+    def __init__(
+        self,
+        archive_path: Path,
+        *,
+        signal_columns: list[str],
+        signal_stats: dict[str, object],
+    ) -> None:
+        self.archive_path = archive_path
+        self.signal_columns = signal_columns
+        self.signal_stats = signal_stats
+        self._tar: tarfile.TarFile | None = None
+        self._cache: dict[str, _SessionSequence] = {}
+
+    def _ensure_tar_open(self) -> None:
+        if self._tar is None:
+            self._tar = tarfile.open(self.archive_path, "r:gz")
+
+    def get_session(self, member_name: str) -> _SessionSequence:
+        cached = self._cache.get(member_name)
+        if cached is not None:
+            return cached
+
+        self._ensure_tar_open()
+        assert self._tar is not None
+
+        extracted = self._tar.extractfile(member_name)
+        if extracted is None:
+            raise FileNotFoundError(f"Missing CSV member: {member_name}")
+
+        rows = list(
+            csv.DictReader(
+                extracted.read().decode("utf-8", errors="replace").splitlines()
+            )
+        )
+        session = _build_session_sequence(
+            rows,
+            member_name=member_name,
+            signal_columns=self.signal_columns,
+            signal_stats=self.signal_stats,
+        )
+        self._cache[member_name] = session
+        return session
+
+
+class _LocalSessionStore:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        signal_columns: list[str],
+        signal_stats: dict[str, object],
+    ) -> None:
+        self.root = root
+        self.signal_columns = signal_columns
+        self.signal_stats = signal_stats
+        self._cache: dict[str, _SessionSequence] = {}
+
+    def get_session(self, member_name: str) -> _SessionSequence | None:
+        normalized_name = normalize_member_name(member_name)
+        cached = self._cache.get(normalized_name)
+        if cached is not None:
+            return cached
+
+        csv_path = member_name_to_path(self.root, normalized_name)
+        if not csv_path.exists():
+            return None
+
+        rows = list(
+            csv.DictReader(
+                csv_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            )
+        )
+        session = _build_session_sequence(
+            rows,
+            member_name=normalized_name,
+            signal_columns=self.signal_columns,
+            signal_stats=self.signal_stats,
+        )
+        self._cache[normalized_name] = session
+        return session
+
+
+class _HybridSessionStore:
+    def __init__(
+        self,
+        archive_path: Path,
+        *,
+        signal_columns: list[str],
+        signal_stats: dict[str, object],
+        local_root: Path | None = None,
+    ) -> None:
+        self.local_store = None
+        if local_root is not None:
+            self.local_store = _LocalSessionStore(
+                local_root,
+                signal_columns=signal_columns,
+                signal_stats=signal_stats,
+            )
+        self.tar_store = _TarSessionStore(
+            archive_path,
+            signal_columns=signal_columns,
+            signal_stats=signal_stats,
+        )
+
+    def get_session(self, member_name: str) -> _SessionSequence:
+        if self.local_store is not None:
+            session = self.local_store.get_session(member_name)
+            if session is not None:
+                return session
+        return self.tar_store.get_session(member_name)
 
 
 class _CsvSequenceStore:
@@ -830,8 +1098,10 @@ class HDBDPaperWindowDataset(Dataset):
             self.prefetched_heatmap_root if self.prefetched_heatmap_root.exists() else None
         )
 
-        self.csv_store = _HybridCsvStore(
+        self.session_store = _HybridSessionStore(
             self.csv_archive_path,
+            signal_columns=self.signal_columns,
+            signal_stats=self.signal_stats,
             local_root=csv_local_root,
         )
         self.seg_store = _HybridImageStore(
@@ -849,55 +1119,36 @@ class HDBDPaperWindowDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, object]:
         row = self.records[index]
         csv_member = str(row["csv_member"])
-        participant_id = str(row["participant_id"])
         start_idx = int(row["window_start_idx"])
         end_idx = int(row["window_end_idx"])
         lookback_steps = int(row["lookback_steps"])
 
-        rows = self.csv_store.get_rows(csv_member)
-        window_rows = rows[start_idx : end_idx + 1]
-        if len(window_rows) != lookback_steps:
+        session = self.session_store.get_session(csv_member)
+        window_image_files = session.image_files[start_idx : end_idx + 1]
+        window_heatmap_files = session.heatmap_files[start_idx : end_idx + 1]
+        if len(window_image_files) != lookback_steps:
             raise ValueError(
                 f"Expected {lookback_steps} rows for {csv_member}[{start_idx}:{end_idx}], "
-                f"but got {len(window_rows)}."
+                f"but got {len(window_image_files)}."
             )
 
         segmentation_frames = []
         heatmap_frames = []
-        signal_sequence = []
 
-        for window_row in window_rows:
-            segmentation_frames.append(
-                self.seg_store.load(window_row["ImageFile"]).unsqueeze(0)
-            )
-            heatmap_frames.append(
-                self.heatmap_store.load(f"{window_row['TimeStamp']}.png").unsqueeze(0)
-            )
-            signal_sequence.append(
-                [
-                    self._normalize_signal_value(
-                        participant_id=participant_id,
-                        column=column,
-                        raw_value=window_row.get(column, ""),
-                    )
-                    for column in self.signal_columns
-                ]
-            )
+        for image_file, heatmap_file in zip(window_image_files, window_heatmap_files):
+            segmentation_frames.append(self.seg_store.load(image_file).unsqueeze(0))
+            heatmap_frames.append(self.heatmap_store.load(heatmap_file).unsqueeze(0))
 
         # Channel 0 = segmentation clip, channel 1 = gaze heatmap clip.
         segmentation_tensor = torch.cat(segmentation_frames, dim=0)
         heatmap_tensor = torch.cat(heatmap_frames, dim=0)
         scene_gaze = torch.stack([segmentation_tensor, heatmap_tensor], dim=0)
 
-        signals = torch.tensor(signal_sequence, dtype=torch.float32)
-        final_row = window_rows[-1]
-        # HMI context is fused late in the model as a compact one-hot vector.
-        hmi_vector = torch.tensor(
-            _one_hot(final_row["navigation"], NAVIGATION_CATEGORIES)
-            + _one_hot(final_row["transparency"], TRANSPARENCY_CATEGORIES)
-            + _one_hot(final_row["weather"], WEATHER_CATEGORIES),
-            dtype=torch.float32,
+        signals = torch.from_numpy(
+            np.ascontiguousarray(session.normalized_signals[start_idx : end_idx + 1])
         )
+        # HMI context is fused late in the model as a compact one-hot vector.
+        hmi_vector = torch.from_numpy(session.hmi_vectors[end_idx])
 
         label = torch.tensor(float(row["label"]), dtype=torch.float32)
 
@@ -907,50 +1158,9 @@ class HDBDPaperWindowDataset(Dataset):
             "hmi": hmi_vector,
             "label": label,
             "sample_id": int(row["sample_id"]),
-            "participant_id": participant_id,
+            "participant_id": str(row["participant_id"]),
             "session_id": str(row["session_id"]),
             "csv_member": csv_member,
             "window_start_idx": start_idx,
             "window_end_idx": end_idx,
         }
-
-    def _normalize_signal_value(
-        self,
-        *,
-        participant_id: str,
-        column: str,
-        raw_value: str | None,
-    ) -> float:
-        parsed_value = _parse_float(raw_value)
-        if parsed_value is None:
-            return 0.0
-
-        if column in PHYSIOLOGY_SIGNAL_COLUMNS:
-            if not _valid_physiology_value(column, parsed_value):
-                return 0.0
-            participant_stats = self.signal_stats.get("physiology", {}).get(
-                participant_id, {}
-            )
-            column_stats = participant_stats.get(column)
-            if not column_stats:
-                return float(parsed_value)
-            std = float(column_stats.get("std", 1.0))
-            mean = float(column_stats.get("mean", 0.0))
-            if std <= 0.0:
-                return 0.0
-            # Physiology is normalized per participant so the model focuses on
-            # deviations from that driver's typical range.
-            return float((parsed_value - mean) / std)
-
-        if column in CAN_BUS_SIGNAL_COLUMNS:
-            column_stats = self.signal_stats.get("can_bus", {}).get(column)
-            if not column_stats:
-                return float(parsed_value)
-            min_value = float(column_stats.get("min", 0.0))
-            max_value = float(column_stats.get("max", 1.0))
-            if max_value <= min_value:
-                return 0.0
-            normalized = (parsed_value - min_value) / (max_value - min_value)
-            return float(max(0.0, min(1.0, normalized)))
-
-        return float(parsed_value)

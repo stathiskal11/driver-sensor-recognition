@@ -107,6 +107,19 @@ Full paper-style reproduction run:
 - Τα `balanced` limited subsets είναι μόνο για debugging και όχι για paper-comparable metrics.
 - Το test evaluation πλέον μπορεί να γίνει πάνω στο `best` validation checkpoint με `--test-checkpoint best`.
 
+## Performance Notes
+
+- Τα compressed `tar.gz` archives είναι πρακτικά το μεγαλύτερο I/O bottleneck του baseline.
+- Στο πρώτο access δημιουργούνται persistent basename indexes δίπλα στα cached inner archives ώστε τα επόμενα runs να αποφεύγουν επαναλαμβανόμενο archive scanning.
+- Το `paper_medium_readiness.json` ενεργοποιεί ήδη `prefetch_subset_assets=true`, γιατί τα medium runs είναι πολύ πιο σταθερά όταν τα πραγματικά αρχεία του subset υλοποιούνται τοπικά πριν το training.
+- Για μεγάλα runs, αν έχεις αρκετό local disk, μπορείς να ζητήσεις πλήρες prefetch των active splits:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train_paper_baseline.py --config configs\paper_full_reproduction.json --prefetch-subset-assets --prefetch-active-splits
+```
+
+- Το `prefetch-active-splits` μπορεί να χρειαστεί πολύ χώρο στο disk, αλλά είναι ο πιο ρεαλιστικός δρόμος όταν θέλεις να αποφύγεις random access πάνω στα tar archives.
+
 ## Τοπικό Setup
 
 ```powershell

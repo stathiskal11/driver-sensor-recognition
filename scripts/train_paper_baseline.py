@@ -255,6 +255,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Extract the exact limited subset assets needed by the run into cache_dir/prefetched_assets before training.",
     )
     parser.add_argument(
+        "--prefetch-active-splits",
+        action="store_true",
+        help="Prefetch all assets for the active train/val/test participant splits into local files before training.",
+    )
+    parser.add_argument(
         "--checkpoint-metric",
         choices=["val_roc_auc", "val_loss"],
         default="val_roc_auc",
@@ -333,6 +338,8 @@ def maybe_prefetch_active_assets(
     heatmap_variant: str,
     cache_dir: Path | None,
     sample_id_lists: list[list[int] | None],
+    participant_id_lists: list[list[str] | None],
+    allow_full_split_prefetch: bool,
 ) -> None:
     combined_sample_ids: list[int] = []
     seen_sample_ids: set[int] = set()
@@ -346,10 +353,40 @@ def maybe_prefetch_active_assets(
             seen_sample_ids.add(normalized_id)
             combined_sample_ids.append(normalized_id)
 
-    if not combined_sample_ids:
+    if combined_sample_ids:
+        prefetch_summary = prefetch_subset_assets(
+            index_csv_path=index_path,
+            bundle_path=bundle_path,
+            heatmap_variant=heatmap_variant,
+            sample_ids=combined_sample_ids,
+            cache_dir=cache_dir,
+        )
+        print(f"prefetch_subset_assets={prefetch_summary}")
+        return
+
+    if not allow_full_split_prefetch:
         print(
             "prefetch_subset_assets=skipped "
             "(no limited subset sample ids were available)"
+        )
+        return
+
+    combined_participant_ids: list[str] = []
+    seen_participant_ids: set[str] = set()
+    for participant_ids in participant_id_lists:
+        if participant_ids is None:
+            continue
+        for participant_id in participant_ids:
+            normalized_id = str(participant_id)
+            if normalized_id in seen_participant_ids:
+                continue
+            seen_participant_ids.add(normalized_id)
+            combined_participant_ids.append(normalized_id)
+
+    if not combined_participant_ids:
+        print(
+            "prefetch_active_splits=skipped "
+            "(no participant ids were available for the active splits)"
         )
         return
 
@@ -357,10 +394,10 @@ def maybe_prefetch_active_assets(
         index_csv_path=index_path,
         bundle_path=bundle_path,
         heatmap_variant=heatmap_variant,
-        sample_ids=combined_sample_ids,
+        participant_ids=combined_participant_ids,
         cache_dir=cache_dir,
     )
-    print(f"prefetch_subset_assets={prefetch_summary}")
+    print(f"prefetch_active_splits={prefetch_summary}")
 
 
 def resolve_device(device_name: str) -> torch.device:
@@ -718,6 +755,12 @@ def run_single_split(
             heatmap_variant=args.heatmap_variant,
             cache_dir=args.cache_dir,
             sample_id_lists=[train_sample_ids, val_sample_ids, test_sample_ids],
+            participant_id_lists=[
+                splits["train"],
+                splits["val"],
+                splits["test"] if args.evaluate_test else None,
+            ],
+            allow_full_split_prefetch=args.prefetch_active_splits,
         )
 
     train_dataset = make_dataset(
