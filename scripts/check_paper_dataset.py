@@ -1,18 +1,8 @@
 from __future__ import annotations
 
-"""Μικρό smoke test για τον Dataset loader του baseline.
-
-Το script αυτό δεν κάνει training.
-Απλώς ελέγχει ότι:
-- ο Dataset class φορτώνει σωστά ένα sample
-- τα tensor shapes είναι τα αναμενόμενα
-- ο DataLoader μπορεί να κάνει batch collation χωρίς error
-"""
-
 import argparse
 import sys
 from pathlib import Path
-
 import torch
 from torch.utils.data import DataLoader
 
@@ -20,12 +10,10 @@ from torch.utils.data import DataLoader
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
 from src.data import HDBDPaperWindowDataset, prefetch_subset_assets
 
 
 def parse_args() -> argparse.Namespace:
-    """Διαβάζει τα arguments του quick dataset sanity check."""
     parser = argparse.ArgumentParser(
         description="Sanity check the paper baseline dataset loader."
     )
@@ -80,12 +68,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_tensor_info(name: str, tensor: torch.Tensor) -> None:
-    """Τυπώνει shape και dtype για ένα tensor."""
     print(f"{name}: shape={tuple(tensor.shape)} dtype={tensor.dtype}")
 
 
 def main() -> None:
-    """Τρέχει έναν μικρό end-to-end έλεγχο του loading pipeline."""
     args = parse_args()
     if args.prefetch_assets:
         prefetch_summary = prefetch_subset_assets(
@@ -96,7 +82,6 @@ def main() -> None:
             cache_dir=args.cache_dir,
         )
         print(f"prefetch_assets={prefetch_summary}")
-
     dataset = HDBDPaperWindowDataset(
         index_csv_path=args.index,
         bundle_path=args.bundle,
@@ -104,9 +89,6 @@ def main() -> None:
         limit_samples=args.limit_samples,
         cache_dir=args.cache_dir,
     )
-
-    # Πρώτα ελέγχουμε ένα μεμονωμένο sample για να δούμε ακριβώς τι επιστρέφει
-    # το dataset πριν μπει στη διαδικασία batching.
     print(f"dataset_len={len(dataset)}")
     sample = dataset[0]
     print(f"sample_id={sample['sample_id']}")
@@ -116,9 +98,6 @@ def main() -> None:
     print_tensor_info("signals", sample["signals"])
     print_tensor_info("hmi", sample["hmi"])
     print_tensor_info("label", sample["label"])
-
-    # Collation is a separate failure point from single-sample loading, so we
-    # always verify at least one real batch as well.
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -132,7 +111,5 @@ def main() -> None:
     print_tensor_info("batch.signals", batch["signals"])
     print_tensor_info("batch.hmi", batch["hmi"])
     print_tensor_info("batch.label", batch["label"])
-
-
 if __name__ == "__main__":
     main()

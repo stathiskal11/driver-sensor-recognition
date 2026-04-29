@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-"""Χτίζει το training index που μετατρέπει raw CSV rows σε paper-style samples.
-
-Το script αυτό είναι το "γέφυρα" ανάμεσα στο raw dataset και στο training.
-Από εδώ και πέρα το project δεν σκέφτεται πια μεμονωμένα rows, αλλά windows
-σταθερού μήκους που αργότερα θα τα φορτώνει ο Dataset class.
-"""
-
 import argparse
 import csv
 import io
@@ -22,8 +15,6 @@ CSV_ARCHIVE = "./hdbd_data/Synced_csv_files-participant_level.tar.gz"
 
 @dataclass
 class BuildStats:
-    """Συνοπτικά στατιστικά του index building run."""
-
     bundle_path: str
     output_csv: str
     output_summary_json: str
@@ -40,7 +31,6 @@ class BuildStats:
 
 
 def parse_args() -> argparse.Namespace:
-    """Ορίζει τα arguments για window generation και label policy."""
     parser = argparse.ArgumentParser(
         description="Build a paper-style sliding-window index from HDBD participant-level CSV files."
     )
@@ -90,12 +80,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def repo_root_from_script() -> Path:
-    """Επιστρέφει το root του repository με βάση το path του script."""
     return Path(__file__).resolve().parents[1]
 
 
 def find_default_bundle() -> Path:
-    """Ψάχνει αυτόματα το hdbd.tar.gz σε common local paths."""
     repo_root = repo_root_from_script()
     candidates = [
         repo_root / "data" / "raw" / "hdbd.tar.gz",
@@ -110,16 +98,10 @@ def find_default_bundle() -> Path:
 
 
 def default_output_path() -> Path:
-    """Default θέση του generated paper window index."""
     return repo_root_from_script() / "data" / "interim" / "paper_window_index.csv"
 
 
 def event_matches(key_event: str, label_mode: str) -> bool:
-    """Μεταφράζει το raw `KeyEvent` σε candidate positive event.
-
-    Διαφορετικά `label_mode` σημαίνουν διαφορετικό ορισμό του positive class.
-    Αυτό είναι από τα πιο κρίσιμα σημεία της αναπαραγωγής του paper.
-    """
     if label_mode in {"final_keydown", "future_keydown"}:
         return key_event == "main_keydown"
     if label_mode in {"final_non_o", "future_non_o"}:
@@ -128,22 +110,14 @@ def event_matches(key_event: str, label_mode: str) -> bool:
 
 
 def effective_horizon_steps(label_mode: str, requested_horizon: int) -> int:
-    """Για final-label modes δεν κοιτάμε στο μέλλον, άρα horizon = 0."""
     if label_mode.startswith("final_"):
         return 0
     return requested_horizon
 
 
 def build_next_positive_index(rows: list[dict[str, str]], label_mode: str) -> list[int | None]:
-    """Για κάθε row κρατάει το index του επόμενου positive event.
-
-    Έτσι, όταν χτίζουμε windows, δεν χρειάζεται να ψάχνουμε ξανά και ξανά
-    προς τα δεξιά για να δούμε αν υπάρχει positive event στο horizon.
-    """
     next_positive: list[int | None] = [None] * len(rows)
     next_seen: int | None = None
-    # Reverse scanning lets each timestep know where the next positive event is
-    # without repeatedly searching forward during window generation.
     for idx in range(len(rows) - 1, -1, -1):
         if event_matches(rows[idx].get("KeyEvent", "O"), label_mode):
             next_seen = idx
@@ -152,7 +126,6 @@ def build_next_positive_index(rows: list[dict[str, str]], label_mode: str) -> li
 
 
 def iter_csv_members(nested_tar: tarfile.TarFile):
-    """Επιστρέφει μόνο τα έγκυρα participant-level CSV members."""
     for member in nested_tar:
         if not member.isfile():
             continue
@@ -164,39 +137,23 @@ def iter_csv_members(nested_tar: tarfile.TarFile):
 
 
 def main() -> None:
-    """Κύρια ροή του index builder.
-
-    Βήματα:
-    1. ανοίγει το participant-level CSV archive
-    2. για κάθε CSV session χτίζει sliding windows
-    3. υπολογίζει label για κάθε window
-    4. γράφει ένα CSV όπου κάθε γραμμή είναι ένα training sample
-    5. γράφει και ένα summary JSON με βασικά στατιστικά
-    """
     args = parse_args()
     bundle_path = (args.bundle or find_default_bundle()).resolve()
     output_path = (args.output or default_output_path()).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path = output_path.with_name(output_path.stem + "_summary.json")
-
     horizon_steps = effective_horizon_steps(
         args.label_mode, args.prediction_horizon_steps
     )
-
     participants: set[str] = set()
     label_counter: Counter[int] = Counter()
     total_rows = 0
     total_windows = 0
     processed_csvs = 0
-
     with tarfile.open(bundle_path, "r:gz") as outer_tar:
         extracted = outer_tar.extractfile(CSV_ARCHIVE)
         if extracted is None:
             raise FileNotFoundError(f"Missing nested archive: {CSV_ARCHIVE}")
-
-        # Το output CSV είναι το κεντρικό index που χρησιμοποιεί αργότερα ο
-        # Dataset loader για να βρει ποιο sequence, ποια εικόνα και ποιο label
-        # αντιστοιχεί σε κάθε sample.
         with tarfile.open(fileobj=extracted, mode="r|gz") as csv_tar, output_path.open(
             "w", encoding="utf-8", newline=""
         ) as out_file:
@@ -226,19 +183,14 @@ def main() -> None:
             ]
             writer = csv.DictWriter(out_file, fieldnames=fieldnames)
             writer.writeheader()
-
             sample_id = 0
             for member in iter_csv_members(csv_tar):
                 processed_csvs += 1
                 if args.limit_csv_files is not None and processed_csvs > args.limit_csv_files:
                     break
-
-                # Το participant_id κρατιέται ξεχωριστά γιατί είναι κρίσιμο για
-                # participant-independent splitting αργότερα.
                 participant_id = PurePosixPath(member.name).parts[1]
                 participants.add(participant_id)
                 session_id = PurePosixPath(member.name).name
-
                 raw_bytes = csv_tar.extractfile(member)
                 if raw_bytes is None:
                     continue
@@ -249,27 +201,18 @@ def main() -> None:
                 )
                 total_rows += len(rows)
                 next_positive = build_next_positive_index(rows, args.label_mode)
-
                 for end_idx in range(args.lookback_steps - 1, len(rows), args.stride):
-                    # Το sample ορίζεται από [start_idx, end_idx] και πάντα έχει
-                    # σταθερό μήκος `lookback_steps`.
                     start_idx = end_idx - args.lookback_steps + 1
                     next_idx = next_positive[end_idx]
                     label = 0
                     offset_steps = ""
                     if next_idx is not None and next_idx <= end_idx + horizon_steps:
-                        # Αν υπάρχει positive event μέσα στο future horizon,
-                        # τότε αυτό το window παίρνει positive label.
                         label = 1
                         offset_steps = str(next_idx - end_idx)
-
                     end_row = rows[end_idx]
                     start_row = rows[start_idx]
                     start_ts = int(start_row["TimeStamp"])
                     end_ts = int(end_row["TimeStamp"])
-
-                    # Every output row is one reusable sample definition that
-                    # the Dataset later resolves back to raw sequence content.
                     writer.writerow(
                         {
                             "sample_id": sample_id,
@@ -296,16 +239,11 @@ def main() -> None:
                             "weather": end_row["weather"],
                         }
                     )
-
-                    # Κρατάμε ξεχωριστά τα label counts για να ξέρουμε αν ο
-                    # τρέχων label ορισμός βγάζει λογικό class balance.
                     label_counter[label] += 1
                     total_windows += 1
                     sample_id += 1
-
     positive_windows = label_counter[1]
     positive_rate_percent = (100.0 * positive_windows / total_windows) if total_windows else 0.0
-
     stats = BuildStats(
         bundle_path=str(bundle_path),
         output_csv=str(output_path),
@@ -321,10 +259,8 @@ def main() -> None:
         positive_windows=positive_windows,
         positive_rate_percent=round(positive_rate_percent, 4),
     )
-
     with summary_path.open("w", encoding="utf-8") as summary_file:
         json.dump(asdict(stats), summary_file, indent=2)
-
     print("Paper window index built successfully.")
     print(f"bundle_path={bundle_path}")
     print(f"output_csv={output_path}")
@@ -337,7 +273,5 @@ def main() -> None:
     print(f"positive_rate_percent={stats.positive_rate_percent}")
     print(f"label_mode={stats.label_mode}")
     print(f"prediction_horizon_steps={stats.prediction_horizon_steps}")
-
-
 if __name__ == "__main__":
     main()

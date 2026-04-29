@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-"""Dataset utilities for loading HDBD paper-style multimodal windows."""
-
 import csv
 import io
 import json
@@ -11,7 +9,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
-
 import numpy as np
 import pandas as pd
 import torch
@@ -27,7 +24,6 @@ HEATMAP_ARCHIVES = {
     "sigma64": "./hdbd_data/Heat_maps_90_160_sigma_64.tar.gz",
     "laplace": "./hdbd_data/Heat_maps_90_160_laplace.tar.gz",
 }
-
 PHYSIOLOGY_SIGNAL_COLUMNS = ["ECGtoHR", "GSR"]
 CAN_BUS_SIGNAL_COLUMNS = ["Throttle", "RPM", "Steering", "Speed"]
 DEFAULT_SIGNAL_COLUMNS = PHYSIOLOGY_SIGNAL_COLUMNS + CAN_BUS_SIGNAL_COLUMNS
@@ -118,10 +114,7 @@ def ensure_inner_archive_cached(
 ) -> Path:
     if target_path.exists():
         return target_path
-
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    # The outer HDBD bundle contains several nested tar files. We cache the
-    # specific inner archive once so later runs can reuse it directly.
     with tarfile.open(bundle_path, "r:gz") as outer_tar:
         extracted = outer_tar.extractfile(inner_member_name)
         if extracted is None:
@@ -156,7 +149,6 @@ def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
         column: {"min": float("inf"), "max": float("-inf")}
         for column in CAN_BUS_SIGNAL_COLUMNS
     }
-
     with tarfile.open(csv_archive_path, "r:gz") as csv_tar:
         for member in csv_tar:
             if not member.isfile():
@@ -165,7 +157,6 @@ def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
                 continue
             if "/.~lock." in member.name:
                 continue
-
             participant_id = PurePosixPath(member.name).parts[1]
             participant_acc = physiology_accumulators.setdefault(
                 participant_id,
@@ -174,11 +165,9 @@ def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
                     for column in PHYSIOLOGY_SIGNAL_COLUMNS
                 },
             )
-
             extracted = csv_tar.extractfile(member)
             if extracted is None:
                 continue
-
             rows = csv.DictReader(
                 extracted.read().decode("utf-8", errors="replace").splitlines()
             )
@@ -192,7 +181,6 @@ def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
                     column_acc["count"] += 1.0
                     column_acc["sum"] += value
                     column_acc["sum_sq"] += value * value
-
                 for column in CAN_BUS_SIGNAL_COLUMNS:
                     value = _parse_float(row.get(column))
                     if value is None:
@@ -203,7 +191,6 @@ def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
                     can_bus_min_max[column]["max"] = max(
                         can_bus_min_max[column]["max"], value
                     )
-
     physiology_stats: dict[str, dict[str, dict[str, float]]] = {}
     for participant_id, participant_acc in physiology_accumulators.items():
         physiology_stats[participant_id] = {}
@@ -222,7 +209,6 @@ def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
                 "mean": mean,
                 "std": std if std > 0 else 1.0,
             }
-
     can_bus_stats: dict[str, dict[str, float]] = {}
     for column, min_max in can_bus_min_max.items():
         min_value = min_max["min"]
@@ -236,7 +222,6 @@ def compute_signal_stats(csv_archive_path: Path) -> dict[str, object]:
             "min": min_value,
             "max": max_value,
         }
-
     return {
         "physiology": physiology_stats,
         "can_bus": can_bus_stats,
@@ -250,7 +235,6 @@ def ensure_signal_stats_cached(
     if stats_path.exists():
         with stats_path.open("r", encoding="utf-8") as stats_file:
             return json.load(stats_file)
-
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     stats = compute_signal_stats(csv_archive_path)
     with stats_path.open("w", encoding="utf-8") as stats_file:
@@ -270,11 +254,9 @@ def load_filtered_index_frame(
         usecols=INDEX_USECOLS,
         dtype=INDEX_DTYPE_MAP,
     )
-
     if participant_ids is not None:
         participant_set = {str(participant_id) for participant_id in participant_ids}
         index_frame = index_frame[index_frame["participant_id"].isin(participant_set)]
-
     if sample_ids is not None:
         ordered_sample_ids = [int(sample_id) for sample_id in sample_ids]
         sample_id_set = set(ordered_sample_ids)
@@ -286,10 +268,8 @@ def load_filtered_index_frame(
         index_frame = index_frame.sort_values("_sample_order").drop(
             columns="_sample_order"
         )
-
     if limit_samples is not None:
         index_frame = index_frame.head(limit_samples)
-
     return index_frame.reset_index(drop=True)
 
 
@@ -342,20 +322,17 @@ class _TarImageStore:
     def _ensure_member_map(self) -> None:
         if self._member_name_by_basename is not None:
             return
-
         index_path = self._member_index_path()
         if index_path.exists():
             with index_path.open("r", encoding="utf-8") as index_file:
                 self._member_name_by_basename = json.load(index_file)
             return
-
         mapping: dict[str, str] = {}
         with tarfile.open(self.archive_path, "r:gz") as tar:
             for member in tar:
                 if not member.isfile():
                     continue
                 mapping[PurePosixPath(member.name).name] = member.name
-
         index_path.parent.mkdir(parents=True, exist_ok=True)
         temp_index_path = index_path.with_name(index_path.name + ".tmp")
         with temp_index_path.open("w", encoding="utf-8") as index_file:
@@ -378,34 +355,26 @@ class _TarImageStore:
         cached = self.cache.get(basename)
         if cached is not None:
             return cached
-
         self._ensure_member_map()
         assert self._member_name_by_basename is not None
-
         member_name = self._member_name_by_basename.get(basename)
         if member_name is None:
-            # Returning zeros keeps tensor shapes stable even when a tiny number
-            # of precomputed image files are missing from the archive.
             tensor = torch.zeros(self.expected_size, dtype=torch.float32)
             self.cache.put(basename, tensor)
             return tensor
-
         self._ensure_tar_open()
         assert self._tar is not None
         assert self._member_info_by_name is not None
-
         member_info = self._member_info_by_name.get(member_name)
         if member_info is None:
             tensor = torch.zeros(self.expected_size, dtype=torch.float32)
             self.cache.put(basename, tensor)
             return tensor
-
         extracted = self._tar.extractfile(member_info)
         if extracted is None:
             tensor = torch.zeros(self.expected_size, dtype=torch.float32)
             self.cache.put(basename, tensor)
             return tensor
-
         image_bytes = extracted.read()
         with Image.open(io.BytesIO(image_bytes)) as image:
             image = image.convert("L")
@@ -414,7 +383,6 @@ class _TarImageStore:
                     (self.expected_size[1], self.expected_size[0]), Image.NEAREST
                 )
             array = np.asarray(image, dtype=np.float32) / 255.0
-
         tensor = torch.from_numpy(array)
         self.cache.put(basename, tensor)
         return tensor
@@ -435,11 +403,9 @@ class _LocalImageStore:
         cached = self.cache.get(basename)
         if cached is not None:
             return cached
-
         image_path = self.root / basename
         if not image_path.exists():
             return None
-
         with Image.open(image_path) as image:
             image = image.convert("L")
             if image.size != (self.expected_size[1], self.expected_size[0]):
@@ -447,7 +413,6 @@ class _LocalImageStore:
                     (self.expected_size[1], self.expected_size[0]), Image.NEAREST
                 )
             array = np.asarray(image, dtype=np.float32) / 255.0
-
         tensor = torch.from_numpy(array)
         self.cache.put(basename, tensor)
         return tensor
@@ -506,46 +471,37 @@ def _build_normalized_signal_column(
         dtype=np.float32,
     )
     normalized = np.zeros(len(rows), dtype=np.float32)
-
     finite_mask = np.isfinite(parsed_values)
     if column in PHYSIOLOGY_SIGNAL_COLUMNS:
         valid_mask = finite_mask & (parsed_values >= 0.0)
         if not np.any(valid_mask):
             return normalized
-
         participant_stats = signal_stats.get("physiology", {}).get(participant_id, {})
         column_stats = participant_stats.get(column)
         if not column_stats:
             normalized[valid_mask] = parsed_values[valid_mask]
             return normalized
-
         std = float(column_stats.get("std", 1.0))
         mean = float(column_stats.get("mean", 0.0))
         if std <= 0.0:
             return normalized
-
         normalized[valid_mask] = (parsed_values[valid_mask] - mean) / std
         return normalized
-
     valid_mask = finite_mask
     if not np.any(valid_mask):
         return normalized
-
     if column in CAN_BUS_SIGNAL_COLUMNS:
         column_stats = signal_stats.get("can_bus", {}).get(column)
         if not column_stats:
             normalized[valid_mask] = parsed_values[valid_mask]
             return normalized
-
         min_value = float(column_stats.get("min", 0.0))
         max_value = float(column_stats.get("max", 1.0))
         if max_value <= min_value:
             return normalized
-
         scaled = (parsed_values[valid_mask] - min_value) / (max_value - min_value)
         normalized[valid_mask] = np.clip(scaled, 0.0, 1.0)
         return normalized
-
     normalized[valid_mask] = parsed_values[valid_mask]
     return normalized
 
@@ -572,7 +528,6 @@ def _build_session_sequence(
         ],
         dtype=np.float32,
     )
-
     signal_columns_data = [
         _build_normalized_signal_column(
             rows,
@@ -587,7 +542,6 @@ def _build_session_sequence(
         if signal_columns_data
         else np.zeros((len(rows), 0), dtype=np.float32)
     )
-
     return _SessionSequence(
         image_files=image_files,
         heatmap_files=heatmap_files,
@@ -618,14 +572,11 @@ class _TarSessionStore:
         cached = self._cache.get(member_name)
         if cached is not None:
             return cached
-
         self._ensure_tar_open()
         assert self._tar is not None
-
         extracted = self._tar.extractfile(member_name)
         if extracted is None:
             raise FileNotFoundError(f"Missing CSV member: {member_name}")
-
         rows = list(
             csv.DictReader(
                 extracted.read().decode("utf-8", errors="replace").splitlines()
@@ -659,11 +610,9 @@ class _LocalSessionStore:
         cached = self._cache.get(normalized_name)
         if cached is not None:
             return cached
-
         csv_path = member_name_to_path(self.root, normalized_name)
         if not csv_path.exists():
             return None
-
         rows = list(
             csv.DictReader(
                 csv_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -723,14 +672,11 @@ class _CsvSequenceStore:
         cached = self._cache.get(member_name)
         if cached is not None:
             return cached
-
         self._ensure_tar_open()
         assert self._tar is not None
-
         extracted = self._tar.extractfile(member_name)
         if extracted is None:
             raise FileNotFoundError(f"Missing CSV member: {member_name}")
-
         rows = list(
             csv.DictReader(
                 extracted.read().decode("utf-8", errors="replace").splitlines()
@@ -750,11 +696,9 @@ class _LocalCsvStore:
         cached = self._cache.get(normalized_name)
         if cached is not None:
             return cached
-
         csv_path = member_name_to_path(self.root, normalized_name)
         if not csv_path.exists():
             return None
-
         rows = list(
             csv.DictReader(csv_path.read_text(encoding="utf-8", errors="replace").splitlines())
         )
@@ -783,7 +727,6 @@ def _extract_selected_csv_members(
     normalized_targets = {normalize_member_name(name) for name in member_names}
     if not normalized_targets:
         return {"requested": 0, "extracted": 0, "reused": 0, "missing": 0}
-
     missing_targets = {
         normalized_name
         for normalized_name in normalized_targets
@@ -793,7 +736,6 @@ def _extract_selected_csv_members(
     extracted_count = 0
     reused_count = len(normalized_targets) - len(missing_targets)
     target_root.mkdir(parents=True, exist_ok=True)
-
     if not pending:
         return {
             "requested": len(normalized_targets),
@@ -801,29 +743,24 @@ def _extract_selected_csv_members(
             "reused": reused_count,
             "missing": 0,
         }
-
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             if not pending:
                 break
             if not member.isfile():
                 continue
-
             normalized_member_name = normalize_member_name(member.name)
             if normalized_member_name not in pending:
                 continue
-
             target_path = member_name_to_path(target_root, normalized_member_name)
             extracted = archive.extractfile(member)
             if extracted is None:
                 continue
-
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with target_path.open("wb") as out_file:
                 shutil.copyfileobj(extracted, out_file, length=1024 * 1024)
             extracted_count += 1
             pending.remove(normalized_member_name)
-
     return {
         "requested": len(normalized_targets),
         "extracted": extracted_count,
@@ -840,7 +777,6 @@ def _extract_selected_image_basenames(
     target_set = {str(name) for name in basenames if str(name)}
     if not target_set:
         return {"requested": 0, "extracted": 0, "reused": 0, "missing": 0}
-
     missing_targets = {
         basename for basename in target_set if not (target_root / basename).exists()
     }
@@ -848,7 +784,6 @@ def _extract_selected_image_basenames(
     extracted_count = 0
     reused_count = len(target_set) - len(missing_targets)
     target_root.mkdir(parents=True, exist_ok=True)
-
     if not pending:
         return {
             "requested": len(target_set),
@@ -856,28 +791,23 @@ def _extract_selected_image_basenames(
             "reused": reused_count,
             "missing": 0,
         }
-
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             if not pending:
                 break
             if not member.isfile():
                 continue
-
             basename = PurePosixPath(member.name).name
             if basename not in pending:
                 continue
-
             target_path = target_root / basename
             extracted = archive.extractfile(member)
             if extracted is None:
                 continue
-
             with target_path.open("wb") as out_file:
                 shutil.copyfileobj(extracted, out_file, length=1024 * 1024)
             extracted_count += 1
             pending.remove(basename)
-
     return {
         "requested": len(target_set),
         "extracted": extracted_count,
@@ -901,14 +831,12 @@ def prefetch_subset_assets(
             f"Unsupported heatmap_variant={heatmap_variant!r}. "
             f"Expected one of {sorted(HEATMAP_ARCHIVES)}."
         )
-
     bundle_path_obj = Path(bundle_path) if bundle_path else default_bundle_path()
     cache_dir_path = Path(cache_dir) if cache_dir else default_cache_dir()
     prefetched_root = default_prefetched_asset_root(cache_dir_path)
     csv_target_root = prefetched_root / "csv"
     seg_target_root = prefetched_root / "seg"
     heatmap_target_root = prefetched_root / f"heatmaps_{heatmap_variant}"
-
     index_frame = load_filtered_index_frame(
         index_csv_path,
         participant_ids=participant_ids,
@@ -917,7 +845,6 @@ def prefetch_subset_assets(
     )
     if len(index_frame) == 0:
         raise ValueError("Cannot prefetch assets for an empty dataset subset.")
-
     csv_archive_path = ensure_inner_archive_cached(
         bundle_path_obj,
         CSV_ARCHIVE,
@@ -933,20 +860,17 @@ def prefetch_subset_assets(
         HEATMAP_ARCHIVES[heatmap_variant],
         cache_dir_path / f"Heat_maps_90_160_{heatmap_variant}.tar.gz",
     )
-
     csv_member_names = index_frame["csv_member"].astype(str).tolist()
     csv_stats = _extract_selected_csv_members(
         csv_archive_path,
         csv_target_root,
         csv_member_names,
     )
-
     csv_store = _LocalCsvStore(csv_target_root)
     segmentation_basenames: set[str] = set()
     heatmap_basenames: set[str] = set()
     csv_member_count = 0
     sample_count = 0
-
     grouped_rows = index_frame.groupby("csv_member", sort=False)
     for csv_member, member_frame in grouped_rows:
         csv_member_count += 1
@@ -955,7 +879,6 @@ def prefetch_subset_assets(
             raise FileNotFoundError(
                 f"Expected prefetched CSV member is missing: {csv_member}"
             )
-
         for sample in member_frame.itertuples(index=False):
             sample_count += 1
             start_idx = int(sample.window_start_idx)
@@ -967,11 +890,9 @@ def prefetch_subset_assets(
                     f"Expected {lookback_steps} rows for {csv_member}[{start_idx}:{end_idx}], "
                     f"but got {len(window_rows)} during asset prefetch."
                 )
-
             for window_row in window_rows:
                 segmentation_basenames.add(str(window_row["ImageFile"]))
                 heatmap_basenames.add(f"{window_row['TimeStamp']}.png")
-
     seg_stats = _extract_selected_image_basenames(
         seg_archive_path,
         seg_target_root,
@@ -982,7 +903,6 @@ def prefetch_subset_assets(
         heatmap_target_root,
         heatmap_basenames,
     )
-
     summary = {
         "sample_count": sample_count,
         "csv_member_count": csv_member_count,
@@ -1031,7 +951,6 @@ class HDBDPaperWindowDataset(Dataset):
                 f"Unsupported heatmap_variant={heatmap_variant!r}. "
                 f"Expected one of {sorted(HEATMAP_ARCHIVES)}."
             )
-
         self.bundle_path = Path(bundle_path) if bundle_path else default_bundle_path()
         self.index_csv_path = (
             Path(index_csv_path) if index_csv_path else default_index_path()
@@ -1046,8 +965,6 @@ class HDBDPaperWindowDataset(Dataset):
         self.prefetched_heatmap_root = (
             self.prefetched_root / f"heatmaps_{self.heatmap_variant}"
         )
-
-        # These are the three archives touched repeatedly during training.
         self.csv_archive_path = ensure_inner_archive_cached(
             self.bundle_path,
             CSV_ARCHIVE,
@@ -1067,14 +984,12 @@ class HDBDPaperWindowDataset(Dataset):
             self.csv_archive_path,
             self.signal_stats_path,
         )
-
         index_frame = load_filtered_index_frame(
             self.index_csv_path,
             participant_ids=participant_ids,
             sample_ids=sample_ids,
             limit_samples=limit_samples,
         )
-
         for column in [
             "participant_id",
             "session_id",
@@ -1086,18 +1001,15 @@ class HDBDPaperWindowDataset(Dataset):
             "weather",
         ]:
             index_frame[column] = index_frame[column].astype("category")
-
         self.index = index_frame.reset_index(drop=True)
         if len(self.index) == 0:
             raise ValueError("The dataset index is empty after applying filters.")
         self.records = self.index.to_dict(orient="records")
-
         csv_local_root = self.prefetched_csv_root if self.prefetched_csv_root.exists() else None
         seg_local_root = self.prefetched_seg_root if self.prefetched_seg_root.exists() else None
         heatmap_local_root = (
             self.prefetched_heatmap_root if self.prefetched_heatmap_root.exists() else None
         )
-
         self.session_store = _HybridSessionStore(
             self.csv_archive_path,
             signal_columns=self.signal_columns,
@@ -1122,7 +1034,6 @@ class HDBDPaperWindowDataset(Dataset):
         start_idx = int(row["window_start_idx"])
         end_idx = int(row["window_end_idx"])
         lookback_steps = int(row["lookback_steps"])
-
         session = self.session_store.get_session(csv_member)
         window_image_files = session.image_files[start_idx : end_idx + 1]
         window_heatmap_files = session.heatmap_files[start_idx : end_idx + 1]
@@ -1131,27 +1042,19 @@ class HDBDPaperWindowDataset(Dataset):
                 f"Expected {lookback_steps} rows for {csv_member}[{start_idx}:{end_idx}], "
                 f"but got {len(window_image_files)}."
             )
-
         segmentation_frames = []
         heatmap_frames = []
-
         for image_file, heatmap_file in zip(window_image_files, window_heatmap_files):
             segmentation_frames.append(self.seg_store.load(image_file).unsqueeze(0))
             heatmap_frames.append(self.heatmap_store.load(heatmap_file).unsqueeze(0))
-
-        # Channel 0 = segmentation clip, channel 1 = gaze heatmap clip.
         segmentation_tensor = torch.cat(segmentation_frames, dim=0)
         heatmap_tensor = torch.cat(heatmap_frames, dim=0)
         scene_gaze = torch.stack([segmentation_tensor, heatmap_tensor], dim=0)
-
         signals = torch.from_numpy(
             np.ascontiguousarray(session.normalized_signals[start_idx : end_idx + 1])
         )
-        # HMI context is fused late in the model as a compact one-hot vector.
         hmi_vector = torch.from_numpy(session.hmi_vectors[end_idx])
-
         label = torch.tensor(float(row["label"]), dtype=torch.float32)
-
         return {
             "scene_gaze": scene_gaze,
             "signals": signals,

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-"""Helpers for summarizing binary classifier outputs during training."""
-
 from dataclasses import asdict, dataclass
-
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
@@ -31,20 +28,15 @@ def summarize_binary_predictions(
 ) -> BinaryPredictionMetrics:
     label_array = np.asarray(labels, dtype=np.float32)
     probability_array = np.asarray(probabilities, dtype=np.float32)
-
     example_count = int(label_array.size)
     positive_count = int(label_array.sum()) if example_count else 0
     positive_rate = float(label_array.mean()) if example_count else 0.0
     mean_probability = (
         float(probability_array.mean()) if probability_array.size else 0.0
     )
-
     roc_auc: float | None = None
-    # Tiny debug subsets may contain only one class, in which case ROC AUC is
-    # undefined and we leave it as None instead of forcing a bogus value.
     if example_count and np.unique(label_array).size >= 2:
         roc_auc = float(roc_auc_score(label_array, probability_array))
-
     return BinaryPredictionMetrics(
         loss=loss,
         batch_count=batch_count,

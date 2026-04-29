@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-"""Small utility layer for experiment folders, summaries, and checkpoints."""
-
 import json
 import re
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
 import torch
 
 
@@ -46,19 +43,16 @@ class ExperimentRecorder:
         timestamp = datetime.now().astimezone()
         base_name = run_name or "paper-baseline"
         run_id = f"{timestamp:%Y%m%d_%H%M%S}_{slugify(base_name)}"
-
         self.run_id = run_id
         self.created_at = timestamp.isoformat(timespec="seconds")
         self.run_dir = experiment_root / run_id
         self.checkpoints_dir = self.run_dir / "checkpoints"
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-
         self.report_only = report_only
         self.config_path = self.run_dir / "config.json"
         self.history_path = self.run_dir / "history.jsonl"
         self.summary_path = self.run_dir / "summary.json"
-
         self._summary: dict[str, Any] = {
             "run_id": self.run_id,
             "created_at": self.created_at,
@@ -67,8 +61,6 @@ class ExperimentRecorder:
             "splits": [],
             "aggregate": {},
         }
-
-        # config.json acts as the immutable snapshot of the run arguments.
         with self.config_path.open("w", encoding="utf-8") as config_file:
             json.dump(self._summary["args"], config_file, indent=2)
 

@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-"""Αντιγράφει το μεγάλο HDBD bundle από το Google Drive στο local Colab disk.
-
-Στο free Colab είναι συνήθως πιο γρήγορο και πιο σταθερό να τρέχουμε τα scripts
-πάνω σε local path όπως `/content/hdbd.tar.gz` αντί να διαβάζουμε το archive
-κατευθείαν από το mounted Drive σε κάθε run.
-"""
-
 import argparse
 import shutil
 from pathlib import Path
@@ -44,10 +37,8 @@ def main() -> None:
     args = parse_args()
     source = args.source.expanduser().resolve()
     dest = args.dest.expanduser()
-
     if not source.exists():
         raise FileNotFoundError(f"Source bundle not found: {source}")
-
     if dest.exists() and not args.force:
         if dest.stat().st_size == source.stat().st_size:
             print("Local bundle already exists with matching size.")
@@ -55,21 +46,15 @@ def main() -> None:
             print(f"dest={dest}")
             print(f"size={human_gb(source.stat().st_size)}")
             return
-
     dest.parent.mkdir(parents=True, exist_ok=True)
-
     print(f"Copying bundle from Drive to local runtime disk...")
     print(f"source={source}")
     print(f"dest={dest}")
     print(f"size={human_gb(source.stat().st_size)}")
-
     with source.open("rb") as src_file, dest.open("wb") as dst_file:
         shutil.copyfileobj(src_file, dst_file, length=16 * 1024 * 1024)
-
     print("Copy complete.")
     print(f"dest={dest}")
     print(f"size={human_gb(dest.stat().st_size)}")
-
-
 if __name__ == "__main__":
     main()

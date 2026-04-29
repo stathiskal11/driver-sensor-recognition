@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-"""Prefetch the exact assets needed by limited paper-baseline split subsets."""
-
 import argparse
 import sys
 from pathlib import Path
@@ -10,7 +8,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
 from src.data import prefetch_subset_assets
 from src.training import make_participant_split, select_subset_sample_ids
 
@@ -98,14 +95,11 @@ def require_limited_subset(sample_ids: list[int] | None, split_name: str) -> lis
 
 def main() -> None:
     args = parse_args()
-
     combined_sample_ids: list[int] = []
     seen_sample_ids: set[int] = set()
-
     for split_offset in range(args.num_split_groups):
         current_seed = args.split_seed + split_offset
         splits = make_participant_split(args.index, seed=current_seed)
-
         train_sample_ids = require_limited_subset(
             select_subset_sample_ids(
                 args.index,
@@ -138,7 +132,6 @@ def main() -> None:
                 ),
                 "test",
             )
-
         split_sample_ids = train_sample_ids + val_sample_ids + test_sample_ids
         for sample_id in split_sample_ids:
             normalized_id = int(sample_id)
@@ -146,7 +139,6 @@ def main() -> None:
                 continue
             seen_sample_ids.add(normalized_id)
             combined_sample_ids.append(normalized_id)
-
         print(
             f"split_seed={current_seed} "
             f"train_samples={len(train_sample_ids)} "
@@ -154,7 +146,6 @@ def main() -> None:
             f"test_samples={len(test_sample_ids)} "
             f"cumulative_unique_samples={len(combined_sample_ids)}"
         )
-
     summary = prefetch_subset_assets(
         index_csv_path=args.index,
         bundle_path=args.bundle,
@@ -163,7 +154,5 @@ def main() -> None:
         cache_dir=args.cache_dir,
     )
     print(f"prefetch_summary={summary}")
-
-
 if __name__ == "__main__":
     main()

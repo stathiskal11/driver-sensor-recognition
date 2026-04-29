@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-"""Participant-level split helpers for paper-style evaluation."""
-
 import csv
 import random
 from dataclasses import dataclass
 from pathlib import Path
-
 import pandas as pd
 
 
@@ -30,7 +27,6 @@ def make_participant_split(
         reader = csv.DictReader(index_file)
         for row in reader:
             participant_ids.add(row["participant_id"])
-
     participants = sorted(participant_ids)
     expected_total = train_count + val_count + test_count
     if len(participants) < expected_total:
@@ -38,15 +34,11 @@ def make_participant_split(
             f"Not enough participants for split: found {len(participants)}, "
             f"need at least {expected_total}."
         )
-
     rng = random.Random(seed)
     rng.shuffle(participants)
-
-    # Splitting at participant level prevents leakage across train/val/test.
     train_ids = participants[:train_count]
     val_ids = participants[train_count : train_count + val_count]
     test_ids = participants[train_count + val_count : expected_total]
-
     return {
         "train": train_ids,
         "val": val_ids,
@@ -63,7 +55,6 @@ def summarize_participant_slices(
         usecols=["participant_id", "label"],
         dtype={"participant_id": "string", "label": "int8"},
     )
-
     summaries: dict[str, SplitIndexSummary] = {}
     for split_name, participant_ids in splits.items():
         participant_set = {str(participant_id) for participant_id in participant_ids}
@@ -79,7 +70,6 @@ def summarize_participant_slices(
             positive_count=positive_count,
             positive_rate=positive_rate,
         )
-
     return summaries
 
 
@@ -93,13 +83,11 @@ def select_subset_sample_ids(
 ) -> list[int] | None:
     if limit_samples is None:
         return None
-
     if strategy not in {"head", "random", "balanced"}:
         raise ValueError(
             f"Unsupported subset strategy: {strategy!r}. "
             "Expected one of: head, random, balanced."
         )
-
     index_frame = pd.read_csv(
         index_csv_path,
         usecols=["sample_id", "participant_id", "label"],
@@ -107,10 +95,8 @@ def select_subset_sample_ids(
     )
     participant_set = {str(participant_id) for participant_id in participant_ids}
     split_frame = index_frame[index_frame["participant_id"].isin(participant_set)]
-
     if len(split_frame) <= limit_samples:
         return split_frame["sample_id"].astype(int).tolist()
-
     if strategy == "head":
         subset = split_frame.head(limit_samples)
         return subset["sample_id"].astype(int).tolist()
@@ -118,10 +104,8 @@ def select_subset_sample_ids(
         subset = split_frame.sample(n=limit_samples, random_state=seed, replace=False)
         return subset["sample_id"].astype(int).tolist()
     else:
-        # Balanced subsets make quick CPU sanity runs more informative.
         positive_frame = split_frame[split_frame["label"] == 1]
         negative_frame = split_frame[split_frame["label"] == 0]
-
         if len(positive_frame) == 0 or len(negative_frame) == 0:
             subset = split_frame.sample(
                 n=limit_samples, random_state=seed, replace=False
@@ -130,17 +114,14 @@ def select_subset_sample_ids(
         else:
             positive_target = min(len(positive_frame), max(1, limit_samples // 2))
             negative_target = min(len(negative_frame), limit_samples - positive_target)
-
             remaining = limit_samples - positive_target - negative_target
             if remaining > 0:
                 extra_positive = min(remaining, len(positive_frame) - positive_target)
                 positive_target += extra_positive
                 remaining -= extra_positive
-
             if remaining > 0:
                 extra_negative = min(remaining, len(negative_frame) - negative_target)
                 negative_target += extra_negative
-
             positive_subset = positive_frame.sample(
                 n=positive_target, random_state=seed, replace=False
             )
@@ -149,7 +130,6 @@ def select_subset_sample_ids(
             )
             positive_ids = positive_subset["sample_id"].astype(int).tolist()
             negative_ids = negative_subset["sample_id"].astype(int).tolist()
-
             ordered_ids: list[int] = []
             max_length = max(len(positive_ids), len(negative_ids))
             for idx in range(max_length):
